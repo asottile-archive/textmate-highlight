@@ -340,19 +340,13 @@ def print_styled(s: str, style: Style) -> None:
     print(f'{color_s}{s}{undo_s}', end='')
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--256', action='store_true')
-    parser.add_argument('theme')
-    parser.add_argument('syntax')
-    parser.add_argument('file')
-    args = parser.parse_args()
+def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 
-    theme = Theme.parse(args.theme)
-    grammar = Grammar.parse(args.syntax)
+    theme = Theme.parse(theme_filename)
+    grammar = Grammar.parse(syntax_filename)
     engine = SelectorEngine(theme)
 
-    with open(args.file) as f:
+    with open(file) as f:
         lines = list(f)
 
     print(C_BG_TRUE.format(**engine.select(('',)).background._asdict()))
@@ -388,18 +382,49 @@ def main() -> int:
                 pos = 0
 
     print('\x1b[m', end='')
-    # TODO: MAGICS
-
-    """\
-    print(C_BG_TRUE.format(**theme.background._asdict()), end='')
-    foreground_style = Style(theme.foreground, False, False)
-    print_styled('foreground\n', foreground_style, theme.foreground)
-    for k, v in theme.token_styles.items():
-        print_styled(f'{k}\n', v, theme.foreground)
-    print('\x1b[m', end='')
-    """
-
     return 0
+
+
+def _theme(theme_filename: str) -> int:
+    theme = Theme.parse(theme_filename)
+    engine = SelectorEngine(theme)
+
+    print(C_BG_TRUE.format(**engine.select(('',)).background._asdict()))
+    print_styled('(DEFAULT)\n', engine.select(('',)))
+    all_styles = {''}
+    all_styles.update((k for k, v in theme.foreground_rules))
+    all_styles.update((k for k, v in theme.background_rules))
+    all_styles.update((k for k, v in theme.bold_rules))
+    all_styles.update((k for k, v in theme.italic_rules))
+    all_styles.update((k for k, v in theme.underline_rules))
+    all_styles.discard('')
+    for k in sorted(all_styles):
+        print_styled(f'{k}\n', engine.select((k,)))
+    print('\x1b[m', end='')
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest='command')
+    subparsers.required = True
+
+    highlight_parser = subparsers.add_parser('highlight')
+    highlight_parser.add_argument('theme')
+    highlight_parser.add_argument('syntax')
+    highlight_parser.add_argument('file')
+
+    theme_parser = subparsers.add_parser('theme')
+    theme_parser.add_argument('theme')
+
+    args = parser.parse_args()
+
+    if args.command == 'highlight':
+        return _highlight(args.theme, args.syntax, args.file)
+    elif args.command == 'theme':
+        return _theme(args.theme)
+    else:
+        raise NotImplementedError(args.command)
 
 
 if __name__ == '__main__':
