@@ -53,6 +53,27 @@ def _table_256() -> Dict[Color, int]:
 TABLE_256 = _table_256()
 
 
+class Style(NamedTuple):
+    foreground: Color
+    background: Color
+    bold: bool
+    italic: bool
+    underline: bool
+
+
+def _select(scope: Tuple[str, ...], rules: Tuple[Tuple[str, T], ...]) -> T:
+    assert len(scope) == 1, scope  # this is wrong!
+    matches = []
+    for selector, color in rules:
+        if selector == scope[0]:
+            matches.append(color)
+    if matches:
+        return matches[0]
+    else:
+        new_scope, _, _ = scope[0].rpartition('.')
+        return _select((new_scope,), rules)
+
+
 class Theme(NamedTuple):
     foreground_rules: Tuple[Tuple[str, Color], ...]
     background_rules: Tuple[Tuple[str, Color], ...]
@@ -117,54 +138,28 @@ class Theme(NamedTuple):
             underline_rules=tuple(underlines.items()),
         )
 
-
-class Style(NamedTuple):
-    foreground: Color
-    background: Color
-    bold: bool
-    italic: bool
-    underline: bool
-
-
-def _select(scope: Tuple[str, ...], rules: Tuple[Tuple[str, T], ...]) -> T:
-    assert len(scope) == 1, scope  # this is wrong!
-    matches = []
-    for selector, color in rules:
-        if selector == scope[0]:
-            matches.append(color)
-    if matches:
-        return matches[0]
-    else:
-        new_scope, _, _ = scope[0].rpartition('.')
-        return _select((new_scope,), rules)
-
-
-class SelectorEngine:
-    def __init__(self, theme: Theme) -> None:
-        self.theme = theme
-
     # TODO: mypy doesn't properly support putting lru_cache on `_select` above
     # python/mypy#1317
 
     @functools.lru_cache(maxsize=None)
     def _select_foreground(self, scope: Tuple[str, ...]) -> Color:
-        return _select(scope, self.theme.foreground_rules)
+        return _select(scope, self.foreground_rules)
 
     @functools.lru_cache(maxsize=None)
     def _select_background(self, scope: Tuple[str, ...]) -> Color:
-        return _select(scope, self.theme.background_rules)
+        return _select(scope, self.background_rules)
 
     @functools.lru_cache(maxsize=None)
     def _select_bold(self, scope: Tuple[str, ...]) -> bool:
-        return _select(scope, self.theme.bold_rules)
+        return _select(scope, self.bold_rules)
 
     @functools.lru_cache(maxsize=None)
     def _select_italic(self, scope: Tuple[str, ...]) -> bool:
-        return _select(scope, self.theme.italic_rules)
+        return _select(scope, self.italic_rules)
 
     @functools.lru_cache(maxsize=None)
     def _select_underline(self, scope: Tuple[str, ...]) -> bool:
-        return _select(scope, self.theme.underline_rules)
+        return _select(scope, self.underline_rules)
 
     @functools.lru_cache(maxsize=None)
     def select(self, scope: Tuple[str, ...]) -> Style:
@@ -344,12 +339,11 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 
     theme = Theme.parse(theme_filename)
     grammar = Grammar.parse(syntax_filename)
-    engine = SelectorEngine(theme)
 
     with open(file) as f:
         lines = list(f)
 
-    print(C_BG_TRUE.format(**engine.select(('',)).background._asdict()))
+    print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
     lineno = 0
     pos = 0
     while lineno < len(lines):
@@ -359,7 +353,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
                 match = rule.match.match(line, pos)
                 if match is not None:
                     # XXX: this should include the file type and full path
-                    style = engine.select((rule.name,))
+                    style = theme.select((rule.name,))
                     print_styled(match[0], style)
                     pos = match.end()  # + 1 ?
                     if pos >= len(line):
@@ -375,7 +369,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             else:
                 raise AssertionError('unreachable!')
         else:
-            print_styled(line[pos], engine.select(('',)))
+            print_styled(line[pos], theme.select(('',)))
             pos += 1
             if pos >= len(line):
                 lineno += 1
@@ -387,10 +381,9 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 
 def _theme(theme_filename: str) -> int:
     theme = Theme.parse(theme_filename)
-    engine = SelectorEngine(theme)
 
-    print(C_BG_TRUE.format(**engine.select(('',)).background._asdict()))
-    print_styled('(DEFAULT)\n', engine.select(('',)))
+    print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
+    print_styled('(DEFAULT)\n', theme.select(('',)))
     all_styles = {''}
     all_styles.update((k for k, v in theme.foreground_rules))
     all_styles.update((k for k, v in theme.background_rules))
@@ -399,7 +392,7 @@ def _theme(theme_filename: str) -> int:
     all_styles.update((k for k, v in theme.underline_rules))
     all_styles.discard('')
     for k in sorted(all_styles):
-        print_styled(f'{k}\n', engine.select((k,)))
+        print_styled(f'{k}\n', theme.select((k,)))
     print('\x1b[m', end='')
     return 0
 
