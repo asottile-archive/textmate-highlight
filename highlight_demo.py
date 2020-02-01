@@ -18,6 +18,7 @@ else:
     Protocol = object
 
 T = TypeVar('T')
+Scope = Tuple[str, ...]
 
 C_256 = '\x1b[38;5;{c}m'
 C_TRUE = '\x1b[38;2;{r};{g};{b}m'
@@ -61,25 +62,48 @@ class Style(NamedTuple):
     underline: bool
 
 
-def _select(scope: Tuple[str, ...], rules: Tuple[Tuple[str, T], ...]) -> T:
-    assert len(scope) == 1, scope  # this is wrong!
-    matches = []
-    for selector, color in rules:
-        if selector == scope[0]:
-            matches.append(color)
-    if matches:
-        return matches[0]
-    else:
-        new_scope, _, _ = scope[0].rpartition('.')
-        return _select((new_scope,), rules)
+class Selector(NamedTuple):
+    # TODO: parts: Tuple[str, ...]
+    s: str
+
+    @classmethod
+    def parse(cls, s: str) -> 'Selector':
+        return cls(s)
+
+    def matches(self, scope: Scope) -> Tuple[bool, int]:
+        s = scope[-1]
+        while s:
+            if s == self.s:
+                return (True, s.count('.') + bool(s))
+            s, _, _ = s.rpartition('.')
+        return (False, -1)
+
+
+DEFAULT_SELECTOR = Selector.parse('')
+
+
+def _select(scope: Scope, rules: Tuple[Tuple[Selector, T], ...]) -> T:
+    for scope_len in range(len(scope), 0, -1):
+        sub_scope = scope[:scope_len]
+        matches = []
+        for selector, t in rules:
+            is_matched, priority = selector.matches(sub_scope)
+            if is_matched:
+                matches.append((priority, t))
+        if matches:  # TODO: and len(matches) == 1
+            _, ret = max(matches)
+            return ret
+
+    assert rules[0][0] == DEFAULT_SELECTOR
+    return rules[0][1]
 
 
 class Theme(NamedTuple):
-    foreground_rules: Tuple[Tuple[str, Color], ...]
-    background_rules: Tuple[Tuple[str, Color], ...]
-    bold_rules: Tuple[Tuple[str, bool], ...]
-    italic_rules: Tuple[Tuple[str, bool], ...]
-    underline_rules: Tuple[Tuple[str, bool], ...]
+    foreground_rules: Tuple[Tuple[Selector, Color], ...]
+    background_rules: Tuple[Tuple[Selector, Color], ...]
+    bold_rules: Tuple[Tuple[Selector, bool], ...]
+    italic_rules: Tuple[Tuple[Selector, bool], ...]
+    underline_rules: Tuple[Tuple[Selector, bool], ...]
 
     @classmethod
     def parse(cls, filename: str) -> 'Theme':
@@ -87,20 +111,20 @@ class Theme(NamedTuple):
             contents = UN_COMMENT.sub('', f.read())
             data = json.loads(contents)
 
-        foregrounds = {'': Color(0xff, 0xff, 0xff)}
-        backgrounds = {'': Color(0x00, 0x00, 0x00)}
-        bolds = {'': False}
-        italics = {'': False}
-        underlines = {'': False}
+        foregrounds = {DEFAULT_SELECTOR: Color(0xff, 0xff, 0xff)}
+        backgrounds = {DEFAULT_SELECTOR: Color(0x00, 0x00, 0x00)}
+        bolds = {DEFAULT_SELECTOR: False}
+        italics = {DEFAULT_SELECTOR: False}
+        underlines = {DEFAULT_SELECTOR: False}
 
         for k in ('foreground', 'editor.foreground'):
             if k in data['colors']:
-                foregrounds[''] = Color.parse(data['colors'][k])
+                foregrounds[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
                 break
 
         for k in ('background', 'editor.background'):
             if k in data['colors']:
-                backgrounds[''] = Color.parse(data['colors'][k])
+                backgrounds[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
                 break
 
         for theme_item in data['tokenColors']:
@@ -118,17 +142,18 @@ class Theme(NamedTuple):
                 scopes = theme_item['scope']
 
             for scope in scopes:
+                selector = Selector.parse(scope)
                 if 'foreground' in theme_item['settings']:
                     color = Color.parse(theme_item['settings']['foreground'])
-                    foregrounds[scope] = color
+                    foregrounds[selector] = color
                 if 'background' in theme_item['settings']:
                     color = Color.parse(theme_item['settings']['background'])
                 if theme_item['settings'].get('fontStyle') == 'bold':
-                    bolds[scope] = True
+                    bolds[selector] = True
                 elif theme_item['settings'].get('fontStyle') == 'italic':
-                    italics[scope] = True
+                    italics[selector] = True
                 elif theme_item['settings'].get('fontStyle') == 'underline':
-                    underlines[scope] = True
+                    underlines[selector] = True
 
         return cls(
             foreground_rules=tuple(foregrounds.items()),
@@ -142,27 +167,27 @@ class Theme(NamedTuple):
     # python/mypy#1317
 
     @functools.lru_cache(maxsize=None)
-    def _select_foreground(self, scope: Tuple[str, ...]) -> Color:
+    def _select_foreground(self, scope: Scope) -> Color:
         return _select(scope, self.foreground_rules)
 
     @functools.lru_cache(maxsize=None)
-    def _select_background(self, scope: Tuple[str, ...]) -> Color:
+    def _select_background(self, scope: Scope) -> Color:
         return _select(scope, self.background_rules)
 
     @functools.lru_cache(maxsize=None)
-    def _select_bold(self, scope: Tuple[str, ...]) -> bool:
+    def _select_bold(self, scope: Scope) -> bool:
         return _select(scope, self.bold_rules)
 
     @functools.lru_cache(maxsize=None)
-    def _select_italic(self, scope: Tuple[str, ...]) -> bool:
+    def _select_italic(self, scope: Scope) -> bool:
         return _select(scope, self.italic_rules)
 
     @functools.lru_cache(maxsize=None)
-    def _select_underline(self, scope: Tuple[str, ...]) -> bool:
+    def _select_underline(self, scope: Scope) -> bool:
         return _select(scope, self.underline_rules)
 
     @functools.lru_cache(maxsize=None)
-    def select(self, scope: Tuple[str, ...]) -> Style:
+    def select(self, scope: Scope) -> Style:
         return Style(
             foreground=self._select_foreground(scope),
             background=self._select_background(scope),
@@ -385,11 +410,11 @@ def _theme(theme_filename: str) -> int:
     print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
     print_styled('(DEFAULT)\n', theme.select(('',)))
     all_styles = {''}
-    all_styles.update((k for k, v in theme.foreground_rules))
-    all_styles.update((k for k, v in theme.background_rules))
-    all_styles.update((k for k, v in theme.bold_rules))
-    all_styles.update((k for k, v in theme.italic_rules))
-    all_styles.update((k for k, v in theme.underline_rules))
+    all_styles.update((k.s for k, v in theme.foreground_rules))
+    all_styles.update((k.s for k, v in theme.background_rules))
+    all_styles.update((k.s for k, v in theme.bold_rules))
+    all_styles.update((k.s for k, v in theme.italic_rules))
+    all_styles.update((k.s for k, v in theme.underline_rules))
     all_styles.discard('')
     for k in sorted(all_styles):
         print_styled(f'{k}\n', theme.select((k,)))
