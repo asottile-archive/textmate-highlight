@@ -384,17 +384,26 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 def _theme(theme_filename: str) -> int:
     theme = Theme.parse(theme_filename)
 
+    foregrounds = dict(theme.foreground_rules)
+    backgrounds = dict(theme.background_rules)
+    bolds = dict(theme.bold_rules)
+    italics = dict(theme.italic_rules)
+    underlines = dict(theme.underline_rules)
+
+    default = theme.select(('',))
+
     print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
-    print_styled('(DEFAULT)\n', theme.select(('',)))
-    all_styles = {''}
-    all_styles.update((k.s for k, v in theme.foreground_rules))
-    all_styles.update((k.s for k, v in theme.background_rules))
-    all_styles.update((k.s for k, v in theme.bold_rules))
-    all_styles.update((k.s for k, v in theme.italic_rules))
-    all_styles.update((k.s for k, v in theme.underline_rules))
-    all_styles.discard('')
-    for k in sorted(all_styles):
-        print_styled(f'{k}\n', theme.select((k,)))
+    rules = {DEFAULT_SELECTOR}
+    rules.update(foregrounds, backgrounds, bolds, italics, underlines)
+    for k in sorted(rules):
+        style = Style(
+            foreground=foregrounds.get(k, default.foreground),
+            background=backgrounds.get(k, default.background),
+            bold=bolds.get(k, default.bold),
+            italic=italics.get(k, default.italic),
+            underline=underlines.get(k, default.underline),
+        )
+        print_styled(f'{k}\n', style)
     print('\x1b[m', end='')
     return 0
 
