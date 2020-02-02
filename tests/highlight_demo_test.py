@@ -5,7 +5,6 @@ from highlight_demo import Selector
 
 
 RULES = (
-    (Selector.parse(''), 'trivial selector'),
     (Selector.parse('foo.bar'), 'foo bar selector'),
     (Selector.parse('foo'), 'foo selector'),
     (Selector.parse('foo bar'), 'foo bar descendant selector'),
@@ -33,4 +32,4 @@ RULES = (
     ),
 )
 def test_select(scope, expected):
-    assert _select(scope, RULES) == expected
+    assert _select(scope, RULES, 'trivial selector') == expected

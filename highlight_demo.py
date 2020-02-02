@@ -55,11 +55,11 @@ TABLE_256 = _table_256()
 
 
 class Style(NamedTuple):
-    foreground: Color
-    background: Color
-    bold: bool
-    italic: bool
-    underline: bool
+    fg: Color
+    bg: Color
+    b: bool
+    i: bool
+    u: bool
 
 
 class Selector(NamedTuple):
@@ -82,7 +82,11 @@ class Selector(NamedTuple):
 DEFAULT_SELECTOR = Selector.parse('')
 
 
-def _select(scope: Scope, rules: Tuple[Tuple[Selector, T], ...]) -> T:
+def _select(
+        scope: Scope,
+        rules: Tuple[Tuple[Selector, T], ...],
+        default: T,
+) -> T:
     for scope_len in range(len(scope), 0, -1):
         sub_scope = scope[:scope_len]
         matches = []
@@ -94,16 +98,20 @@ def _select(scope: Scope, rules: Tuple[Tuple[Selector, T], ...]) -> T:
             _, ret = max(matches)
             return ret
 
-    assert rules[0][0] == DEFAULT_SELECTOR
-    return rules[0][1]
+    return default
 
 
 class Theme(NamedTuple):
-    foreground_rules: Tuple[Tuple[Selector, Color], ...]
-    background_rules: Tuple[Tuple[Selector, Color], ...]
-    bold_rules: Tuple[Tuple[Selector, bool], ...]
-    italic_rules: Tuple[Tuple[Selector, bool], ...]
-    underline_rules: Tuple[Tuple[Selector, bool], ...]
+    fg_default: Color
+    bg_default: Color
+    b_default: bool
+    i_default: bool
+    u_default: bool
+    fg_rules: Tuple[Tuple[Selector, Color], ...]
+    bg_rules: Tuple[Tuple[Selector, Color], ...]
+    b_rules: Tuple[Tuple[Selector, bool], ...]
+    i_rules: Tuple[Tuple[Selector, bool], ...]
+    u_rules: Tuple[Tuple[Selector, bool], ...]
 
     @classmethod
     def parse(cls, filename: str) -> 'Theme':
@@ -111,20 +119,20 @@ class Theme(NamedTuple):
             contents = UN_COMMENT.sub('', f.read())
             data = json.loads(contents)
 
-        foregrounds = {DEFAULT_SELECTOR: Color(0xff, 0xff, 0xff)}
-        backgrounds = {DEFAULT_SELECTOR: Color(0x00, 0x00, 0x00)}
-        bolds = {DEFAULT_SELECTOR: False}
-        italics = {DEFAULT_SELECTOR: False}
-        underlines = {DEFAULT_SELECTOR: False}
+        fg_d = {DEFAULT_SELECTOR: Color(0xff, 0xff, 0xff)}
+        bg_d = {DEFAULT_SELECTOR: Color(0x00, 0x00, 0x00)}
+        b_d = {DEFAULT_SELECTOR: False}
+        i_d = {DEFAULT_SELECTOR: False}
+        u_d = {DEFAULT_SELECTOR: False}
 
         for k in ('foreground', 'editor.foreground'):
             if k in data['colors']:
-                foregrounds[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
+                fg_d[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
                 break
 
         for k in ('background', 'editor.background'):
             if k in data['colors']:
-                backgrounds[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
+                bg_d[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
                 break
 
         for theme_item in data['tokenColors']:
@@ -145,32 +153,38 @@ class Theme(NamedTuple):
                 selector = Selector.parse(scope)
                 if 'foreground' in theme_item['settings']:
                     color = Color.parse(theme_item['settings']['foreground'])
-                    foregrounds[selector] = color
+                    fg_d[selector] = color
                 if 'background' in theme_item['settings']:
                     color = Color.parse(theme_item['settings']['background'])
+                    bg_d[selector] = color
                 if theme_item['settings'].get('fontStyle') == 'bold':
-                    bolds[selector] = True
+                    b_d[selector] = True
                 elif theme_item['settings'].get('fontStyle') == 'italic':
-                    italics[selector] = True
+                    i_d[selector] = True
                 elif theme_item['settings'].get('fontStyle') == 'underline':
-                    underlines[selector] = True
+                    u_d[selector] = True
 
         return cls(
-            foreground_rules=tuple(foregrounds.items()),
-            background_rules=tuple(backgrounds.items()),
-            bold_rules=tuple(bolds.items()),
-            italic_rules=tuple(italics.items()),
-            underline_rules=tuple(underlines.items()),
+            fg_default=fg_d.pop(DEFAULT_SELECTOR),
+            bg_default=bg_d.pop(DEFAULT_SELECTOR),
+            b_default=b_d.pop(DEFAULT_SELECTOR),
+            i_default=i_d.pop(DEFAULT_SELECTOR),
+            u_default=u_d.pop(DEFAULT_SELECTOR),
+            fg_rules=tuple(fg_d.items()),
+            bg_rules=tuple(bg_d.items()),
+            b_rules=tuple(b_d.items()),
+            i_rules=tuple(i_d.items()),
+            u_rules=tuple(u_d.items()),
         )
 
     @functools.lru_cache(maxsize=None)
     def select(self, scope: Scope) -> Style:
         return Style(
-            foreground=_select(scope, self.foreground_rules),
-            background=_select(scope, self.background_rules),
-            bold=_select(scope, self.bold_rules),
-            italic=_select(scope, self.italic_rules),
-            underline=_select(scope, self.underline_rules),
+            fg=_select(scope, self.fg_rules, self.fg_default),
+            bg=_select(scope, self.bg_rules, self.bg_default),
+            b=_select(scope, self.b_rules, self.b_default),
+            i=_select(scope, self.i_rules, self.i_default),
+            u=_select(scope, self.u_rules, self.u_default),
         )
 
 
@@ -322,16 +336,16 @@ class Grammar(NamedTuple):
 def print_styled(s: str, style: Style) -> None:
     color_s = ''
     undo_s = ''
-    color_s += C_TRUE.format(**style.foreground._asdict())
-    color_s += C_BG_TRUE.format(**style.background._asdict())
+    color_s += C_TRUE.format(**style.fg._asdict())
+    color_s += C_BG_TRUE.format(**style.bg._asdict())
     undo_s += '\x1b[39m'
-    if style.bold:
+    if style.b:
         color_s += '\x1b[1m'
         undo_s += '\x1b[22m'
-    if style.italic:
+    if style.i:
         color_s += '\x1b[3m'
         undo_s += '\x1b[23m'
-    if style.underline:
+    if style.u:
         color_s += '\x1b[4m'
         undo_s += '\x1b[24m'
     print(f'{color_s}{s}{undo_s}', end='')
@@ -345,7 +359,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     with open(file) as f:
         lines = list(f)
 
-    print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
+    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
     lineno = 0
     pos = 0
     end_stack = [re.compile('$ ^')]
@@ -413,24 +427,21 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 def _theme(theme_filename: str) -> int:
     theme = Theme.parse(theme_filename)
 
-    foregrounds = dict(theme.foreground_rules)
-    backgrounds = dict(theme.background_rules)
-    bolds = dict(theme.bold_rules)
-    italics = dict(theme.italic_rules)
-    underlines = dict(theme.underline_rules)
+    fg_d = dict(theme.fg_rules)
+    bg_d = dict(theme.bg_rules)
+    b_d = dict(theme.b_rules)
+    i_d = dict(theme.i_rules)
+    u_d = dict(theme.u_rules)
 
-    default = theme.select(('',))
-
-    print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
-    rules = {DEFAULT_SELECTOR}
-    rules.update(foregrounds, backgrounds, bolds, italics, underlines)
+    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
+    rules = {DEFAULT_SELECTOR}.union(fg_d, bg_d, b_d, i_d, u_d)
     for k in sorted(rules):
         style = Style(
-            foreground=foregrounds.get(k, default.foreground),
-            background=backgrounds.get(k, default.background),
-            bold=bolds.get(k, default.bold),
-            italic=italics.get(k, default.italic),
-            underline=underlines.get(k, default.underline),
+            fg=fg_d.get(k, theme.fg_default),
+            bg=bg_d.get(k, theme.bg_default),
+            b=b_d.get(k, theme.b_default),
+            i=i_d.get(k, theme.i_default),
+            u=u_d.get(k, theme.u_default),
         )
         print_styled(f'{k}\n', style)
     print('\x1b[m', end='')
