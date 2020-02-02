@@ -348,6 +348,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
     lineno = 0
     pos = 0
+    scope_stack = [grammar.scope_name]
     while lineno < len(lines):
         line = lines[lineno]
         for rule in grammar.patterns:
@@ -355,7 +356,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
                 match = rule.match.match(line, pos)
                 if match is not None:
                     # XXX: this should include the file type and full path
-                    style = theme.select((rule.name,))
+                    style = theme.select((*scope_stack, rule.name))
                     print_styled(match[0], style)
                     pos = match.end()  # + 1 ?
                     if pos >= len(line):
@@ -371,7 +372,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             else:
                 raise AssertionError('unreachable!')
         else:
-            print_styled(line[pos], theme.select(('',)))
+            print_styled(line[pos], theme.select(tuple(scope_stack)))
             pos += 1
             if pos >= len(line):
                 lineno += 1
