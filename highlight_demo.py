@@ -348,10 +348,27 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     print(C_BG_TRUE.format(**theme.select(('',)).background._asdict()))
     lineno = 0
     pos = 0
+    end_stack = [re.compile('$ ^')]
+    rules_stack = [grammar.patterns]
     scope_stack = [grammar.scope_name]
     while lineno < len(lines):
         line = lines[lineno]
-        for rule in grammar.patterns:
+
+        match = end_stack[-1].match(line, pos)
+        if match is not None:
+            style = theme.select(tuple(scope_stack))
+            print_styled(match[0], style)
+            pos = match.end()
+            if pos >= len(line):
+                lineno += 1
+                pos = 0
+
+            end_stack.pop()
+            rules_stack.pop()
+            scope_stack.pop()
+            continue
+
+        for rule in rules_stack[-1]:
             if rule.match is not None:
                 match = rule.match.match(line, pos)
                 if match is not None:
@@ -366,8 +383,19 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             # start / end based one -- how to do this?
             elif rule.begin is not None:
                 assert rule.end is not None
-                if rule.begin.match(line):
-                    raise NotImplementedError('begin/end tokens')
+                assert rule.name is not None
+                match = rule.begin.match(line)
+                if match:
+                    end_stack.append(re.compile(match.expand(rule.end)))
+                    rules_stack.append(rule.patterns)
+                    scope_stack.append(rule.name)
+
+                    style = theme.select(tuple(scope_stack))
+                    print_styled(match[0], style)
+                    pos = match.end()
+                    if pos >= len(line):
+                        lineno += 1
+                        pos = 0
                     break
             else:
                 raise AssertionError('unreachable!')
