@@ -163,37 +163,14 @@ class Theme(NamedTuple):
             underline_rules=tuple(underlines.items()),
         )
 
-    # TODO: mypy doesn't properly support putting lru_cache on `_select` above
-    # python/mypy#1317
-
-    @functools.lru_cache(maxsize=None)
-    def _select_foreground(self, scope: Scope) -> Color:
-        return _select(scope, self.foreground_rules)
-
-    @functools.lru_cache(maxsize=None)
-    def _select_background(self, scope: Scope) -> Color:
-        return _select(scope, self.background_rules)
-
-    @functools.lru_cache(maxsize=None)
-    def _select_bold(self, scope: Scope) -> bool:
-        return _select(scope, self.bold_rules)
-
-    @functools.lru_cache(maxsize=None)
-    def _select_italic(self, scope: Scope) -> bool:
-        return _select(scope, self.italic_rules)
-
-    @functools.lru_cache(maxsize=None)
-    def _select_underline(self, scope: Scope) -> bool:
-        return _select(scope, self.underline_rules)
-
     @functools.lru_cache(maxsize=None)
     def select(self, scope: Scope) -> Style:
         return Style(
-            foreground=self._select_foreground(scope),
-            background=self._select_background(scope),
-            bold=self._select_bold(scope),
-            italic=self._select_italic(scope),
-            underline=self._select_underline(scope),
+            foreground=_select(scope, self.foreground_rules),
+            background=_select(scope, self.background_rules),
+            bold=_select(scope, self.bold_rules),
+            italic=_select(scope, self.italic_rules),
+            underline=_select(scope, self.underline_rules),
         )
 
 
