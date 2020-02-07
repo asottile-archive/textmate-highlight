@@ -3,6 +3,7 @@ repos:
     rev: v2.3.0
     hooks:
     -   id: trailing-whitespace
+        exclude: ^demo/files/patch.diff$
     -   id: end-of-file-fixer
     -   id: check-docstring-first
     -   id: check-yaml
