@@ -351,8 +351,13 @@ def print_styled(s: str, style: Style) -> None:
     print(f'{color_s}{s}{undo_s}', end='')
 
 
-def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
+class Entry(NamedTuple):
+    rules: Tuple[_Rule, ...]
+    end: Pattern[str]
+    scopes: Tuple[str, ...]
 
+
+def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     theme = Theme.parse(theme_filename)
     grammar = Grammar.parse(syntax_filename)
 
@@ -362,32 +367,35 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     print(C_BG_TRUE.format(**theme.bg_default._asdict()))
     lineno = 0
     pos = 0
-    end_stack = [re.compile('$ ^')]
-    rules_stack = [grammar.patterns]
-    scope_stack = [grammar.scope_name]
+    stack = [Entry(grammar.patterns, re.compile(' ^'), (grammar.scope_name,))]
     while lineno < len(lines):
         line = lines[lineno]
+        entry = stack[-1]
 
-        match = end_stack[-1].match(line, pos)
+        match = entry.end.match(line, pos)
         if match is not None:
-            style = theme.select(tuple(scope_stack))
+            style = theme.select(entry.scopes)
             print_styled(match[0], style)
             pos = match.end()
             if pos >= len(line):
                 lineno += 1
                 pos = 0
 
-            end_stack.pop()
-            rules_stack.pop()
-            scope_stack.pop()
+            stack.pop()
             continue
 
-        for rule in rules_stack[-1]:
+        for rule in entry.rules:
+            # XXX: can a rule have an include also?
+            if rule.include is not None:
+                assert rule.match is None
+                assert rule.begin is None
+                rule = grammar.repository[rule.include[1:]]
+
             if rule.match is not None:
                 match = rule.match.match(line, pos)
                 if match is not None:
                     # XXX: this should include the file type and full path
-                    style = theme.select((*scope_stack, rule.name))
+                    style = theme.select((*entry.scopes, rule.name))
                     print_styled(match[0], style)
                     pos = match.end()  # + 1 ?
                     if pos >= len(line):
@@ -397,14 +405,21 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             # start / end based one -- how to do this?
             elif rule.begin is not None:
                 assert rule.end is not None
-                assert rule.name is not None
-                match = rule.begin.match(line)
+                match = rule.begin.match(line, pos)
                 if match:
-                    end_stack.append(re.compile(match.expand(rule.end)))
-                    rules_stack.append(rule.patterns)
-                    scope_stack.append(rule.name)
+                    if rule.name is not None:
+                        next_scopes = (*entry.scopes, rule.name)
+                    else:
+                        next_scopes = entry.scopes
+                    stack.append(
+                        Entry(
+                            rule.patterns,
+                            re.compile(match.expand(rule.end)),
+                            next_scopes,
+                        ),
+                    )
 
-                    style = theme.select(tuple(scope_stack))
+                    style = theme.select(next_scopes)
                     print_styled(match[0], style)
                     pos = match.end()
                     if pos >= len(line):
@@ -414,7 +429,7 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             else:
                 raise AssertionError('unreachable!')
         else:
-            print_styled(line[pos], theme.select(tuple(scope_stack)))
+            print_styled(line[pos], theme.select(entry.scopes))
             pos += 1
             if pos >= len(line):
                 lineno += 1
