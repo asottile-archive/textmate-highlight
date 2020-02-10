@@ -5,13 +5,15 @@ import json
 import re
 from typing import Any
 from typing import Dict
-from typing import List
+from typing import Generator
 from typing import NamedTuple
 from typing import Optional
 from typing import Pattern
 from typing import Tuple
 from typing import TYPE_CHECKING
 from typing import TypeVar
+
+from onigurumacffi import compile as re_compile
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -28,82 +30,6 @@ C_RESET = '\x1b[m'
 
 # yes I know this is wrong, but it's good enough for now
 UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
-
-POSSESSIVE = re.compile(r'(?<!\\)(?:\\\\)*([*+]\+)')
-RE_COMMENT = re.compile(r'(?<!\\)(?:\\\\)*(\(\?#)')
-END_PAREN = re.compile(r'(?<!\\)(?:\\\\)*\)', re.DOTALL)
-CHAR_ESCAPE = re.compile(
-    r'x[a-fA-F0-9]{2}|'  # \xa0
-    r'u[a-fA-F0-9]{4}|'  # \u2603
-    r'U[a-fA-F0-9]{8}|'  # \U0001f643
-    r'N\{[^}]+\}|'       # \N{SNOWMAN}
-    r'0[0-7]{0,2}|'      # \0 \01 \033
-    r'[0-7]{3}|'         # \101
-    r'[1-9][0-9]?',       # \1 - \99
-)
-HEX_ESCAPE = re.compile(r'((?<!\\)(?:\\\\)*)(\\[hH])')
-HEX_MAP = {r'\h': '[0-9a-fA-F]', r'\H': '[^0-9a-fA-F]'}
-
-
-def _tokenize_re(s: str) -> Dict[int, int]:
-    stack: List[Tuple[str, int]] = []
-    ret = {}
-    for i, c in enumerate(s):
-        if (not stack or stack[-1][0] != '\\') and c == '\\':
-            stack.append(('\\', i))
-        elif stack and stack[-1][0] == '\\':
-            match = CHAR_ESCAPE.match(s, i)
-            if match is not None:
-                _, ret[match.end() - 1] = stack.pop()
-            else:
-                _, ret[i] = stack.pop()
-        else:
-            if stack and stack[-1][0] == '[':
-                if c == ']' and i > stack[-1][1] + 1:
-                    _, ret[i] = stack.pop()
-            elif stack and stack[-1][0] == '(' and c == ')':
-                _, ret[i] = stack.pop()
-            elif c == '(':
-                stack.append(('(', i))
-            elif c == '[':
-                stack.append(('[', i))
-    return ret
-
-
-def _remove_comments(s: str) -> str:
-    match = RE_COMMENT.search(s)
-    while match is not None:
-        end_paren_match = END_PAREN.search(s, match.end())
-        # malformed regex, let the engine complain at them!
-        if end_paren_match is None:
-            return s
-        s = s[:match.start(1)] + s[end_paren_match.end():]
-
-        match = RE_COMMENT.search(s)
-    return s
-
-
-def re_compile(s: str) -> Pattern[str]:
-    s = _remove_comments(s)
-    s = HEX_ESCAPE.sub(lambda m: f'{m[1]}{HEX_MAP[m[2]]}', s)
-
-    n = 0
-    match = POSSESSIVE.search(s)
-    while match is not None:
-        brackets = _tokenize_re(s)
-        start, end = match.start(1), match.end(1)
-        if start - 1 in brackets:
-            back = brackets[start - 1] - start
-        else:
-            back = -1
-
-        inner = s[start + back:start + 1]
-        repl = f'(?=(?P<_possessive_{n}>{inner}))(?P=_possessive_{n})'
-        s = f'{s[:start + back]}{repl}{s[end:]}'
-        n += 1
-
-        match = POSSESSIVE.search(s)
-    return re.compile(s)
 
 
 class Color(NamedTuple):
@@ -461,13 +387,24 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             stack.pop()
             continue
 
-        for rule in entry.rules:
-            # XXX: can a rule have an include also?
-            if rule.include is not None:
-                assert rule.match is None
-                assert rule.begin is None
-                rule = grammar.repository[rule.include[1:]]
+        def _rules_gen() -> Generator[_Rule, None, None]:
+            rules = list(reversed(entry.rules))
 
+            while rules:
+                rule = rules.pop()
+
+                # XXX: can a rule have an include also?
+                if rule.include is not None:
+                    assert rule.match is None
+                    assert rule.begin is None
+                    rule = grammar.repository[rule.include[1:]]
+
+                if rule.match is None and rule.begin is None and rule.patterns:
+                    rules.extend(reversed(rule.patterns))
+                else:
+                    yield rule
+
+        for rule in _rules_gen():
             if rule.match is not None:
                 match = rule.match.match(line, pos)
                 if match is not None:
