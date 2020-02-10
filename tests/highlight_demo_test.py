@@ -84,7 +84,7 @@ def test_re_compile_group():
 
 
 def test_re_compile_unicode_escape():
-    pattern = re_compile('"\u2603++"')
+    pattern = re_compile(r'"\u2603++"')
     assert pattern.groupindex
     assert pattern.match('"☃☃☃☃"')
 
