@@ -381,18 +381,6 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
         line = lines[lineno]
         entry = stack[-1]
 
-        match = entry.end.match(line, pos)
-        if match is not None:
-            style = theme.select(entry.scopes)
-            print_styled(match[0], style)
-            pos = match.end()
-            if pos >= len(line):
-                lineno += 1
-                pos = 0
-
-            stack.pop()
-            continue
-
         def _end_cb(match: Match[str]) -> Style:
             stack.pop()
             return theme.select(entry.scopes)
