@@ -4,8 +4,11 @@ import itertools
 import json
 import re
 from typing import Any
+from typing import Callable
 from typing import Dict
 from typing import Generator
+from typing import List
+from typing import Match
 from typing import NamedTuple
 from typing import Optional
 from typing import Pattern
@@ -360,6 +363,9 @@ class Entry(NamedTuple):
     scopes: Tuple[str, ...]
 
 
+StyleCB = Callable[[Match[str]], Style]
+
+
 def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     theme = Theme.parse(theme_filename)
     grammar = Grammar.parse(syntax_filename)
@@ -387,7 +393,35 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
             stack.pop()
             continue
 
-        def _rules_gen() -> Generator[_Rule, None, None]:
+        def _end_cb(match: Match[str]) -> Style:
+            stack.pop()
+            return theme.select(entry.scopes)
+
+        def _get_match_cb(rule: _Rule) -> StyleCB:
+            def _match_cb(match: Match[str]) -> Style:
+                if rule.name is None:
+                    return theme.select(entry.scopes)
+                else:
+                    return theme.select((*entry.scopes, rule.name))
+            return _match_cb
+
+        def _get_begin_cb(rule: _Rule) -> StyleCB:
+            def _begin_cb(match: Match[str]) -> Style:
+                assert rule.end is not None
+                if rule.name is not None:
+                    next_scopes = (*entry.scopes, rule.name)
+                else:
+                    next_scopes = entry.scopes
+
+                end_re = re_compile(match.expand(rule.end))
+                stack.append(Entry(rule.patterns, end_re, next_scopes))
+
+                return theme.select(next_scopes)
+            return _begin_cb
+
+        def _reg_gen() -> Generator[Tuple[Pattern[str], StyleCB], None, None]:
+            yield entry.end, _end_cb
+
             rules = list(reversed(entry.rules))
 
             while rules:
@@ -401,53 +435,39 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 
                 if rule.match is None and rule.begin is None and rule.patterns:
                     rules.extend(reversed(rule.patterns))
+                elif rule.match is not None:
+                    yield rule.match, _get_match_cb(rule)
+                elif rule.begin is not None:
+                    yield rule.begin, _get_begin_cb(rule)
                 else:
-                    yield rule
+                    raise AssertionError(f'unreachable {rule}')
 
-        for rule in _rules_gen():
-            if rule.match is not None:
-                match = rule.match.match(line, pos)
-                if match is not None:
-                    # XXX: this should include the file type and full path
-                    style = theme.select((*entry.scopes, rule.name))
-                    print_styled(match[0], style)
-                    pos = match.end()  # + 1 ?
-                    if pos >= len(line):
-                        lineno += 1
-                        pos = 0
+        matches: List[Tuple[int, int, Match[str], StyleCB]] = []
+        for reg, cb in _reg_gen():
+            match = reg.search(line, pos)
+            if match is not None:
+                # shortcut: exact match
+                if match.start() == pos:
+                    matches = [(match.start(), 0, match, cb)]
                     break
-            # start / end based one -- how to do this?
-            elif rule.begin is not None:
-                assert rule.end is not None
-                match = rule.begin.match(line, pos)
-                if match:
-                    if rule.name is not None:
-                        next_scopes = (*entry.scopes, rule.name)
-                    else:
-                        next_scopes = entry.scopes
-                    stack.append(
-                        Entry(
-                            rule.patterns,
-                            re_compile(match.expand(rule.end)),
-                            next_scopes,
-                        ),
-                    )
+                else:
+                    matches.append((match.start(), len(matches), match, cb))
 
-                    style = theme.select(next_scopes)
-                    print_styled(match[0], style)
-                    pos = match.end()
-                    if pos >= len(line):
-                        lineno += 1
-                        pos = 0
-                    break
-            else:
-                raise AssertionError('unreachable!')
-        else:
-            print_styled(line[pos], theme.select(entry.scopes))
-            pos += 1
+        if matches:
+            _, _, match, cb = min(matches)
+            print_styled(line[pos:match.start()], theme.select(entry.scopes))
+
+            style = cb(match)
+            print_styled(match[0], style)
+
+            pos = match.end()
             if pos >= len(line):
                 lineno += 1
                 pos = 0
+        else:
+            print_styled(line[pos:], theme.select(entry.scopes))
+            lineno += 1
+            pos = 0
 
     print('\x1b[m', end='')
     return 0
