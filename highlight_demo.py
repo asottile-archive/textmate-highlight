@@ -26,6 +26,8 @@ else:
 T = TypeVar('T')
 Scope = Tuple[str, ...]
 
+NO_RE = re_compile(' ^')
+
 C_256 = '\x1b[38;5;{c}m'
 C_TRUE = '\x1b[38;2;{r};{g};{b}m'
 C_BG_TRUE = '\x1b[48;2;{r};{g};{b}m'
@@ -357,13 +359,12 @@ def print_styled(s: str, style: Style) -> None:
     print(f'{color_s}{s}{undo_s}', end='')
 
 
-class Entry(NamedTuple):
-    rules: Tuple[_Rule, ...]
-    end: Pattern[str]
-    scopes: Tuple[str, ...]
-
-
 StyleCB = Callable[[Match[str]], Style]
+
+
+class Entry(NamedTuple):
+    regs: Tuple[Tuple[Pattern[str], StyleCB], ...]
+    scopes: Tuple[str, ...]
 
 
 def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
@@ -376,11 +377,13 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
     print(C_BG_TRUE.format(**theme.bg_default._asdict()))
     lineno = 0
     pos = 0
-    stack = [Entry(grammar.patterns, re_compile(' ^'), (grammar.scope_name,))]
-    while lineno < len(lines):
-        line = lines[lineno]
-        entry = stack[-1]
+    stack: List[Entry] = []
 
+    def _entry(
+            patterns: Tuple[_Rule, ...],
+            end: Pattern[str],
+            scope: Tuple[str, ...],
+    ) -> Entry:
         def _end_cb(match: Match[str]) -> Style:
             stack.pop()
             return theme.select(entry.scopes)
@@ -402,15 +405,15 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
                     next_scopes = entry.scopes
 
                 end_re = re_compile(match.expand(rule.end))
-                stack.append(Entry(rule.patterns, end_re, next_scopes))
+                stack.append(_entry(rule.patterns, end_re, next_scopes))
 
                 return theme.select(next_scopes)
             return _begin_cb
 
         def _reg_gen() -> Generator[Tuple[Pattern[str], StyleCB], None, None]:
-            yield entry.end, _end_cb
+            yield end, _end_cb
 
-            rules = list(reversed(entry.rules))
+            rules = list(reversed(patterns))
 
             while rules:
                 rule = rules.pop()
@@ -430,8 +433,15 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
                 else:
                     raise AssertionError(f'unreachable {rule}')
 
+        return Entry(tuple(_reg_gen()), scope)
+
+    stack.append(_entry(grammar.patterns, NO_RE, (grammar.scope_name,)))
+    while lineno < len(lines):
+        line = lines[lineno]
+        entry = stack[-1]
+
         matches: List[Tuple[int, int, Match[str], StyleCB]] = []
-        for reg, cb in _reg_gen():
+        for reg, cb in entry.regs:
             match = reg.search(line, pos)
             if match is not None:
                 # shortcut: exact match
