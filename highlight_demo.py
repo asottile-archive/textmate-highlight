@@ -6,27 +6,25 @@ import re
 from typing import Any
 from typing import Callable
 from typing import Dict
-from typing import Generator
 from typing import List
 from typing import Match
 from typing import NamedTuple
 from typing import Optional
-from typing import Pattern
 from typing import Tuple
 from typing import TYPE_CHECKING
 from typing import TypeVar
 
-from onigurumacffi import compile as re_compile
+import onigurumacffi
 
 if TYPE_CHECKING:
     from typing import Protocol
 else:
     Protocol = object
 
+compile_regset = functools.lru_cache()(onigurumacffi.compile_regset)
+
 T = TypeVar('T')
 Scope = Tuple[str, ...]
-
-NO_RE = re_compile(' ^')
 
 C_256 = '\x1b[38;5;{c}m'
 C_TRUE = '\x1b[38;2;{r};{g};{b}m'
@@ -201,9 +199,9 @@ class _Rule(Protocol):
     @property
     def name(self) -> Optional[str]: ...
     @property
-    def match(self) -> Optional[Pattern[str]]: ...
+    def match(self) -> Optional[str]: ...
     @property
-    def begin(self) -> Optional[Pattern[str]]: ...
+    def begin(self) -> Optional[str]: ...
     @property
     def end(self) -> Optional[str]: ...
     @property
@@ -222,8 +220,8 @@ class _Rule(Protocol):
 
 class Rule(NamedTuple):
     name: Optional[str]
-    match: Optional[Pattern[str]]
-    begin: Optional[Pattern[str]]
+    match: Optional[str]
+    begin: Optional[str]
     end: Optional[str]
     content_name: Optional[str]
     captures: Dict[int, str]
@@ -234,31 +232,11 @@ class Rule(NamedTuple):
 
     @classmethod
     def from_dct(cls, dct: Dict[str, Any]) -> _Rule:
-        if 'name' in dct:
-            name = dct['name']
-        else:
-            name = None
-
-        if 'match' in dct:
-            match: Optional[Pattern[str]] = re_compile(dct['match'])
-        else:
-            match = None
-
-        if 'begin' in dct:
-            begin: Optional[Pattern[str]] = re_compile(dct['begin'])
-        else:
-            begin = None
-
-        # end can have back references so we lazily compile this
-        if 'end' in dct:
-            end = dct['end']
-        else:
-            end = None
-
-        if 'contentName' in dct:
-            content_name = dct['contentName']
-        else:
-            content_name = None
+        name = dct.get('name')
+        match = dct.get('match')
+        begin = dct.get('begin')
+        end = dct.get('end')
+        content_name = dct.get('contentName')
 
         if 'captures' in dct:
             captures = {int(k): v['name'] for k, v in dct['captures'].items()}
@@ -279,10 +257,7 @@ class Rule(NamedTuple):
         else:
             end_captures = {}
 
-        if 'include' in dct:
-            include = dct['include']
-        else:
-            include = None
+        include = dct.get('include')
 
         if 'patterns' in dct:
             patterns = tuple(Rule.from_dct(d) for d in dct['patterns'])
@@ -363,7 +338,8 @@ StyleCB = Callable[[Match[str]], Style]
 
 
 class Entry(NamedTuple):
-    regs: Tuple[Tuple[Pattern[str], StyleCB], ...]
+    regset: onigurumacffi._RegSet
+    callbacks: Tuple[StyleCB, ...]
     scopes: Tuple[str, ...]
 
 
@@ -381,81 +357,67 @@ def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
 
     def _entry(
             patterns: Tuple[_Rule, ...],
-            end: Pattern[str],
+            end: str,
             scope: Tuple[str, ...],
     ) -> Entry:
         def _end_cb(match: Match[str]) -> Style:
             stack.pop()
             return theme.select(entry.scopes)
 
-        def _get_match_cb(rule: _Rule) -> StyleCB:
-            def _match_cb(match: Match[str]) -> Style:
-                if rule.name is None:
-                    return theme.select(entry.scopes)
-                else:
-                    return theme.select((*entry.scopes, rule.name))
-            return _match_cb
+        def _match_cb(match: Match[str], *, rule: _Rule) -> Style:
+            if rule.name is None:
+                return theme.select(entry.scopes)
+            else:
+                return theme.select((*entry.scopes, rule.name))
 
-        def _get_begin_cb(rule: _Rule) -> StyleCB:
-            def _begin_cb(match: Match[str]) -> Style:
-                assert rule.end is not None
-                if rule.name is not None:
-                    next_scopes = (*entry.scopes, rule.name)
-                else:
-                    next_scopes = entry.scopes
+        def _begin_cb(match: Match[str], *, rule: _Rule) -> Style:
+            assert rule.end is not None
+            if rule.name is not None:
+                next_scopes = (*entry.scopes, rule.name)
+            else:
+                next_scopes = entry.scopes
 
-                end_re = re_compile(match.expand(rule.end))
-                stack.append(_entry(rule.patterns, end_re, next_scopes))
+            end = match.expand(rule.end)
+            stack.append(_entry(rule.patterns, end, next_scopes))
 
-                return theme.select(next_scopes)
-            return _begin_cb
+            return theme.select(next_scopes)
 
-        def _reg_gen() -> Generator[Tuple[Pattern[str], StyleCB], None, None]:
-            yield end, _end_cb
+        regs = [end]
+        cbs = [_end_cb]
 
-            rules = list(reversed(patterns))
+        rules = list(reversed(patterns))
+        while rules:
+            rule = rules.pop()
 
-            while rules:
-                rule = rules.pop()
+            # XXX: can a rule have an include also?
+            if rule.include is not None:
+                assert rule.match is None
+                assert rule.begin is None
+                rule = grammar.repository[rule.include[1:]]
 
-                # XXX: can a rule have an include also?
-                if rule.include is not None:
-                    assert rule.match is None
-                    assert rule.begin is None
-                    rule = grammar.repository[rule.include[1:]]
+            if rule.match is None and rule.begin is None and rule.patterns:
+                rules.extend(reversed(rule.patterns))
+            elif rule.match is not None:
+                regs.append(rule.match)
+                cbs.append(functools.partial(_match_cb, rule=rule))
+            elif rule.begin is not None:
+                regs.append(rule.begin)
+                cbs.append(functools.partial(_begin_cb, rule=rule))
+            else:
+                raise AssertionError(f'unreachable {rule}')
 
-                if rule.match is None and rule.begin is None and rule.patterns:
-                    rules.extend(reversed(rule.patterns))
-                elif rule.match is not None:
-                    yield rule.match, _get_match_cb(rule)
-                elif rule.begin is not None:
-                    yield rule.begin, _get_begin_cb(rule)
-                else:
-                    raise AssertionError(f'unreachable {rule}')
+        return Entry(compile_regset(*regs), tuple(cbs), scope)
 
-        return Entry(tuple(_reg_gen()), scope)
-
-    stack.append(_entry(grammar.patterns, NO_RE, (grammar.scope_name,)))
+    stack.append(_entry(grammar.patterns, ' ^', (grammar.scope_name,)))
     while lineno < len(lines):
         line = lines[lineno]
         entry = stack[-1]
 
-        matches: List[Tuple[int, int, Match[str], StyleCB]] = []
-        for reg, cb in entry.regs:
-            match = reg.search(line, pos)
-            if match is not None:
-                # shortcut: exact match
-                if match.start() == pos:
-                    matches = [(match.start(), 0, match, cb)]
-                    break
-                else:
-                    matches.append((match.start(), len(matches), match, cb))
-
-        if matches:
-            _, _, match, cb = min(matches)
+        idx, match = entry.regset.search(line, pos)
+        if match is not None:
             print_styled(line[pos:match.start()], theme.select(entry.scopes))
 
-            style = cb(match)
+            style = entry.callbacks[idx](match)
             print_styled(match[0], style)
 
             pos = match.end()
