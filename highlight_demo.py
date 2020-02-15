@@ -1,4 +1,5 @@
 import argparse
+import curses
 import functools
 import itertools
 import json
@@ -6,6 +7,7 @@ import re
 from typing import Any
 from typing import Callable
 from typing import Dict
+from typing import Generator
 from typing import List
 from typing import Match
 from typing import NamedTuple
@@ -43,6 +45,13 @@ class Color(NamedTuple):
     @classmethod
     def parse(cls, s: str) -> 'Color':
         return cls(r=int(s[1:3], 16), g=int(s[3:5], 16), b=int(s[5:7], 16))
+
+    def as_curses(self) -> Tuple[int, int, int]:
+        return (
+            int(1000 * self.r / 255),
+            int(1000 * self.g / 255),
+            int(1000 * self.b / 255),
+        )
 
 
 def _table_256() -> Dict[Color, int]:
@@ -373,6 +382,7 @@ class Entry(NamedTuple):
     scope: Scope
 
 
+@functools.lru_cache(maxsize=None)
 def _highlight_line(state: State, line: str) -> Tuple[State, Regions]:
     ret = []
     pos = 0
@@ -485,10 +495,7 @@ def _entry(
     )
 
 
-def _highlight(theme_filename: str, lang_filename: str, filename: str) -> int:
-    theme = Theme.parse(theme_filename)
-    grammar = Grammar.parse(lang_filename)
-
+def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
     print(C_BG_TRUE.format(**theme.bg_default._asdict()))
     state: Tuple[_Entry, ...] = (
         _entry(
@@ -504,6 +511,109 @@ def _highlight(theme_filename: str, lang_filename: str, filename: str) -> int:
             for start, end, scope in regions:
                 print_styled(line[start:end], theme.select(scope))
     print('\x1b[m', end='')
+    return 0
+
+
+def _draw_screen(
+        stdscr: 'curses._CursesWindow',
+        curses_colors: Dict[Tuple[Color, Color], int],
+        theme: Theme,
+        grammar: Grammar,
+        lines: List[str],
+        y: int,
+) -> None:
+    regions_by_line = []
+
+    state: Tuple[_Entry, ...] = (
+        _entry(
+            grammar.repository.__getitem__,
+            grammar.patterns,
+            ' ^',
+            (grammar.scope_name,),
+        ),
+    )
+    for line in lines[:y + curses.LINES]:
+        state, regions = _highlight_line(state, line)
+        regions_by_line.append(regions)
+
+    for i in range(curses.LINES):
+        assert y + i < len(lines)
+        stdscr.insstr(i, 0, lines[y + i])
+        for start, end, scope in regions_by_line[y + i]:
+            style = theme.select(scope)
+            pair = curses_colors[(style.bg, style.fg)]
+            stdscr.chgat(i, start, end - start, curses.color_pair(pair))
+
+
+def _make_curses_colors(theme: Theme) -> Dict[Tuple[Color, Color], int]:
+    assert curses.can_change_color()
+
+    all_bgs = {theme.bg_default}.union(dict(theme.bg_rules).values())
+    all_fgs = {theme.fg_default}.union(dict(theme.fg_rules).values())
+
+    colors = {theme.bg_default: 0, theme.fg_default: 7}
+    curses.init_color(0, *theme.bg_default.as_curses())
+    curses.init_color(7, *theme.fg_default.as_curses())
+
+    def _color_id() -> Generator[int, None, None]:
+        """need to skip already assigned colors"""
+        skip = frozenset(colors.values())
+        i = 0
+        while True:
+            i += 1
+            if i not in skip:
+                yield i
+
+    for i, color in zip(_color_id(), all_bgs | all_fgs):
+        curses.init_color(i, *color.as_curses())
+        colors[color] = i
+
+    ret = {(theme.bg_default, theme.fg_default): 0}
+    all_combinations = set(itertools.product(all_bgs, all_fgs))
+    all_combinations.discard((theme.bg_default, theme.fg_default))
+    for i, (bg, fg) in enumerate(all_combinations, 1):
+        curses.init_pair(i, colors[fg], colors[bg])
+        ret[(bg, fg)] = i
+
+    return ret
+
+
+def _highlight_curses(
+        stdscr: 'curses._CursesWindow',
+        theme: Theme,
+        grammar: Grammar,
+        filename: str,
+) -> int:
+    with open(filename) as f:
+        lines = list(f)
+
+    curses_colors = _make_curses_colors(theme)
+
+    y = 0
+    while True:
+        _draw_screen(stdscr, curses_colors, theme, grammar, lines, y)
+
+        wch = stdscr.get_wch()
+        key = wch if isinstance(wch, int) else ord(wch)
+        keyname = curses.keyname(key)
+        if key == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+        elif key == curses.KEY_DOWN:
+            y = min(y + 1, len(lines) - curses.LINES)
+        elif key == curses.KEY_UP:
+            y = max(0, y - 1)
+        elif keyname == b'kEND5':
+            y = len(lines) - curses.LINES
+        elif keyname == b'kHOM5':
+            y = 0
+        elif wch == '"':
+            lines[y] = '"' + lines[y]
+        elif key == curses.KEY_DC:
+            lines[y] = lines[y][1:]
+        elif keyname == b'^X':
+            break
+        else:
+            raise NotImplementedError(wch, key, keyname)
     return 0
 
 
@@ -537,9 +647,14 @@ def main() -> int:
     subparsers.required = True
 
     highlight_parser = subparsers.add_parser('highlight')
+    highlight_parser.add_argument(
+        '--renderer',
+        choices=('curses', 'output'),
+        default='output',
+    )
     highlight_parser.add_argument('theme')
     highlight_parser.add_argument('syntax')
-    highlight_parser.add_argument('file')
+    highlight_parser.add_argument('filename')
 
     theme_parser = subparsers.add_parser('theme')
     theme_parser.add_argument('theme')
@@ -547,7 +662,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == 'highlight':
-        return _highlight(args.theme, args.syntax, args.file)
+        theme = Theme.parse(args.theme)
+        grammar = Grammar.parse(args.syntax)
+        if args.renderer == 'output':
+            return _highlight_output(theme, grammar, args.filename)
+        elif args.renderer == 'curses':
+            return curses.wrapper(
+                _highlight_curses, theme, grammar, args.filename,
+            )
+        else:
+            raise NotImplementedError(args.renderer)
     elif args.command == 'theme':
         return _theme(args.theme)
     else:
