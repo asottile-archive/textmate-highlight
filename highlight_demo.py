@@ -339,119 +339,170 @@ def print_styled(s: str, style: Style) -> None:
     print(f'{color_s}{s}{undo_s}', end='')
 
 
-StyleCB = Callable[[Match[str], Tuple[str, ...]], Style]
+class Region(NamedTuple):
+    start: int
+    end: int
+    scope: Scope
+
+    @classmethod
+    def from_match(cls, match: Match[str], scope: Scope) -> 'Region':
+        return cls(match.start(), match.end(), scope)
+
+
+Regions = Tuple[Region, ...]
+State = Tuple['_Entry', ...]
+StyleCB = Callable[[Match[str], State], Tuple[State, Regions]]
+
+
+class _Entry(Protocol):
+    """hax for recursive types python/mypy#731"""
+    @property
+    def lookup_include(self) -> Callable[[str], _Rule]: ...
+    @property
+    def regset(self) -> onigurumacffi._RegSet: ...
+    @property
+    def callbacks(self) -> Tuple[StyleCB, ...]: ...
+    @property
+    def scope(self) -> Scope: ...
 
 
 class Entry(NamedTuple):
+    lookup_include: Callable[[str], _Rule]
     regset: onigurumacffi._RegSet
     callbacks: Tuple[StyleCB, ...]
-    scope: Tuple[str, ...]
+    scope: Scope
 
 
-def _highlight(theme_filename: str, syntax_filename: str, file: str) -> int:
-    theme = Theme.parse(theme_filename)
-    grammar = Grammar.parse(syntax_filename)
-
-    with open(file) as f:
-        lines = list(f)
-
-    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
-    lineno = 0
+def _highlight_line(state: State, line: str) -> Tuple[State, Regions]:
+    ret = []
     pos = 0
-    stack: List[Entry] = []
-
-    def _end_cb(match: Match[str], scope: Tuple[str, ...]) -> Style:
-        stack.pop()
-        return theme.select(scope)
-
-    def _match_cb_no_name(match: Match[str], scope: Tuple[str, ...]) -> Style:
-        return theme.select(scope)
-
-    def _match_cb(
-            match: Match[str],
-            scope: Tuple[str, ...],
-            *,
-            rule: _Rule,
-    ) -> Style:
-        return theme.select((*scope, rule.name))
-
-    def _begin_cb(
-            match: Match[str],
-            scope: Tuple[str, ...],
-            *,
-            rule: _Rule,
-    ) -> Style:
-        assert rule.end is not None
-        if rule.name is not None:
-            next_scopes = (*scope, rule.name)
-        else:
-            next_scopes = scope
-
-        end = match.expand(rule.end)
-        stack.append(_entry(rule.patterns, end, next_scopes))
-
-        return theme.select(next_scopes)
-
-    @functools.lru_cache(maxsize=None)
-    def _regs_cbs(rules: Tuple[_Rule, ...]) -> Tuple[List[str], List[StyleCB]]:
-        regs = []
-        cbs: List[StyleCB] = []
-
-        rules_stack = list(reversed(rules))
-        while rules_stack:
-            rule = rules_stack.pop()
-
-            # XXX: can a rule have an include also?
-            if rule.include is not None:
-                assert rule.match is None
-                assert rule.begin is None
-                rule = grammar.repository[rule.include[1:]]
-
-            if rule.match is None and rule.begin is None and rule.patterns:
-                rules_stack.extend(reversed(rule.patterns))
-            elif rule.match is not None:
-                regs.append(rule.match)
-                if rule.name is None:
-                    cbs.append(_match_cb_no_name)
-                else:
-                    cbs.append(functools.partial(_match_cb, rule=rule))
-            elif rule.begin is not None:
-                regs.append(rule.begin)
-                cbs.append(functools.partial(_begin_cb, rule=rule))
-            else:
-                raise AssertionError(f'unreachable {rule}')
-
-        return regs, cbs
-
-    def _entry(
-            patterns: Tuple[_Rule, ...],
-            end: str,
-            scope: Tuple[str, ...],
-    ) -> Entry:
-        regs, cbs = _regs_cbs(patterns)
-        return Entry(compile_regset(end, *regs), (_end_cb, *cbs), scope)
-
-    stack.append(_entry(grammar.patterns, ' ^', (grammar.scope_name,)))
-    while lineno < len(lines):
-        line = lines[lineno]
-        entry = stack[-1]
+    while pos < len(line):
+        entry = state[-1]
 
         idx, match = entry.regset.search(line, pos)
         if match is not None:
-            print_styled(line[pos:match.start()], theme.select(entry.scope))
+            if match.start() > pos:
+                ret.append(Region(pos, match.start(), entry.scope))
 
-            style = entry.callbacks[idx](match, entry.scope)
-            print_styled(match[0], style)
+            state, regions = entry.callbacks[idx](match, state)
+            ret.extend(regions)
 
             pos = match.end()
-            if pos >= len(line):
-                lineno += 1
-                pos = 0
         else:
-            print_styled(line[pos:], theme.select(entry.scope))
-            lineno += 1
-            pos = 0
+            ret.append(Region(pos, len(line), entry.scope))
+            pos = len(line)
 
+    return state, tuple(ret)
+
+
+def _end_cb(match: Match[str], state: State) -> Tuple[State, Regions]:
+    return state[:-1], (Region.from_match(match, state[-1].scope),)
+
+
+def _match_cb_no_name(
+        match: Match[str],
+        state: State,
+) -> Tuple[State, Regions]:
+    return state, (Region.from_match(match, state[-1].scope),)
+
+
+def _match_cb(
+        match: Match[str],
+        state: State,
+        *,
+        rule: _Rule,
+) -> Tuple[State, Regions]:
+    assert rule.name is not None
+    return state, (Region.from_match(match, (*state[-1].scope, rule.name)),)
+
+
+def _begin_cb(
+        match: Match[str],
+        state: State,
+        *,
+        rule: _Rule,
+) -> Tuple[State, Regions]:
+    assert rule.end is not None
+    prev_entry = state[-1]
+    if rule.name is not None:
+        next_scopes = (*prev_entry.scope, rule.name)
+    else:
+        next_scopes = prev_entry.scope
+
+    end = match.expand(rule.end)
+    entry = _entry(prev_entry.lookup_include, rule.patterns, end, next_scopes)
+
+    return (*state, entry), (Region.from_match(match, next_scopes),)
+
+
+@functools.lru_cache(maxsize=None)
+def _regs_cbs(
+        lookup_include: Callable[[str], _Rule],
+        rules: Tuple[_Rule, ...],
+) -> Tuple[Tuple[str, ...], Tuple[StyleCB, ...]]:
+    regs = []
+    cbs: List[StyleCB] = []
+
+    rules_stack = list(reversed(rules))
+    while rules_stack:
+        rule = rules_stack.pop()
+
+        # XXX: can a rule have an include also?
+        if rule.include is not None:
+            assert rule.match is None
+            assert rule.begin is None
+            rule = lookup_include(rule.include[1:])
+
+        if rule.match is None and rule.begin is None and rule.patterns:
+            rules_stack.extend(reversed(rule.patterns))
+        elif rule.match is not None:
+            regs.append(rule.match)
+            if rule.name is None:
+                cbs.append(_match_cb_no_name)
+            else:
+                cbs.append(functools.partial(_match_cb, rule=rule))
+        elif rule.begin is not None:
+            regs.append(rule.begin)
+            cbs.append(functools.partial(_begin_cb, rule=rule))
+        else:
+            raise AssertionError(f'unreachable {rule}')
+
+    return tuple(regs), tuple(cbs)
+
+
+def _entry(
+        lookup_include: Callable[[str], _Rule],
+        patterns: Tuple[_Rule, ...],
+        end: str,
+        scope: Scope,
+) -> _Entry:
+    regs, cbs = _regs_cbs(lookup_include, patterns)
+    return Entry(
+        lookup_include,
+        compile_regset(end, *regs),
+        (_end_cb, *cbs),
+        scope,
+    )
+
+
+def _highlight(theme_filename: str, lang_filename: str, filename: str) -> int:
+    theme = Theme.parse(theme_filename)
+    grammar = Grammar.parse(lang_filename)
+
+    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
+    state: Tuple[_Entry, ...] = (
+        _entry(
+            grammar.repository.__getitem__,
+            grammar.patterns,
+            ' ^',
+            (grammar.scope_name,),
+        ),
+    )
+    with open(filename) as f:
+        for line in f:
+            state, regions = _highlight_line(state, line)
+            for start, end, scope in regions:
+                print_styled(line[start:end], theme.select(scope))
     print('\x1b[m', end='')
     return 0
 
