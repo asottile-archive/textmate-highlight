@@ -3,6 +3,7 @@ import curses
 import functools
 import itertools
 import json
+import plistlib
 import re
 from typing import Any
 from typing import Callable
@@ -301,9 +302,9 @@ class Grammar(NamedTuple):
 
     @classmethod
     def parse(cls, filename: str) -> 'Grammar':
-        with open(filename) as f:
-            contents = UN_COMMENT.sub('', f.read())
-            data = json.loads(contents)
+        with open(filename, 'rb') as f:
+            # https://github.com/python/typeshed/pull/3738
+            data = plistlib.load(f)  # type: ignore
 
         scope_name = data['scopeName']
         if 'firstLineMatch' in data:

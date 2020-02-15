@@ -4,5 +4,5 @@ HERE="$(dirname "$(readlink -f "$0")")"
 exec python3 "${HERE}/../highlight_demo.py" \
     highlight \
     "${HERE}/themes/dark_vs.json" \
-    "${HERE}/languages/diff.tmLanguage.json" \
+    "${HERE}/languages/Diff.plist" \
     "${HERE}/files/patch.diff"
