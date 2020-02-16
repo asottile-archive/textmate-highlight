@@ -274,6 +274,12 @@ class Rule(NamedTuple):
         else:
             end_captures = ()
 
+        # Using the captures key for a begin/end rule is short-hand for
+        # giving both beginCaptures and endCaptures with same values
+        if begin and captures:
+            end_captures = begin_captures = captures
+            captures = ()
+
         include = dct.get('include')
 
         if 'patterns' in dct:
