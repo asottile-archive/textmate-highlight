@@ -11,6 +11,7 @@ from typing import Callable
 from typing import Dict
 from typing import FrozenSet
 from typing import Generator
+from typing import Generic
 from typing import List
 from typing import Match
 from typing import NamedTuple
@@ -29,6 +30,8 @@ else:
 compile_regset = functools.lru_cache()(onigurumacffi.compile_regset)
 
 T = TypeVar('T')
+TKey = TypeVar('TKey')
+TValue = TypeVar('TValue')
 Scope = Tuple[str, ...]
 
 C_256 = '\x1b[38;5;{c}m'
@@ -301,12 +304,24 @@ class Rule(NamedTuple):
         )
 
 
+class FDict(Generic[TKey, TValue]):
+    def __init__(self, dct: Dict[TKey, TValue]) -> None:
+        self._hash = hash(tuple(sorted(dct.items())))
+        self._dct = dct
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __getitem__(self, k: TKey) -> TValue:
+        return self._dct[k]
+
+
 class Grammar(NamedTuple):
     scope_name: str
     first_line_match: Optional[onigurumacffi._Pattern]
     file_types: FrozenSet[str]
     patterns: Tuple[_Rule, ...]
-    repository: Dict[str, _Rule]
+    repository: FDict[str, _Rule]
 
     @classmethod
     def parse(cls, filename: str) -> 'Grammar':
@@ -325,17 +340,27 @@ class Grammar(NamedTuple):
             file_types = frozenset()
         patterns = tuple(Rule.from_dct(dct) for dct in data['patterns'])
         if 'repository' in data:
-            repository = {
+            repository = FDict({
                 k: Rule.from_dct(dct) for k, dct in data['repository'].items()
-            }
+            })
         else:
-            repository = {}
+            repository = FDict({})
         return cls(
             scope_name=scope_name,
             first_line_match=first_line_match,
             file_types=file_types,
             patterns=patterns,
             repository=repository,
+        )
+
+    @classmethod
+    def blank(cls) -> 'Grammar':
+        return cls(
+            scope_name='source.unknown',
+            first_line_match=None,
+            file_types=frozenset(),
+            patterns=(),
+            repository=FDict({}),
         )
 
     def matches_file(self, filename: str) -> bool:
@@ -686,13 +711,7 @@ def main() -> int:
         if grammar.matches_file(args.filename):
             break
     else:
-        grammar = Grammar(
-            scope_name='source.unknown',
-            first_line_match=None,
-            file_types=frozenset(),
-            patterns=(),
-            repository={},
-        )
+        grammar = Grammar.blank()
 
     if args.command == 'highlight':
         theme = Theme.parse(args.theme)
