@@ -411,7 +411,7 @@ StyleCB = Callable[[Match[str], State], Tuple[State, Regions]]
 class _Entry(Protocol):
     """hax for recursive types python/mypy#731"""
     @property
-    def lookup_include(self) -> Callable[[str], _Rule]: ...
+    def grammar(self) -> Grammar: ...
     @property
     def regset(self) -> onigurumacffi._RegSet: ...
     @property
@@ -421,7 +421,7 @@ class _Entry(Protocol):
 
 
 class Entry(NamedTuple):
-    lookup_include: Callable[[str], _Rule]
+    grammar: Grammar
     regset: onigurumacffi._RegSet
     callbacks: Tuple[StyleCB, ...]
     scope: Scope
@@ -485,14 +485,14 @@ def _begin_cb(
         next_scopes = prev_entry.scope
 
     end = match.expand(rule.end)
-    entry = _entry(prev_entry.lookup_include, rule.patterns, end, next_scopes)
+    entry = _entry(prev_entry.grammar, rule.patterns, end, next_scopes)
 
     return (*state, entry), (Region.from_match(match, next_scopes),)
 
 
 @functools.lru_cache(maxsize=None)
 def _regs_cbs(
-        lookup_include: Callable[[str], _Rule],
+        grammar: Grammar,
         rules: Tuple[_Rule, ...],
 ) -> Tuple[Tuple[str, ...], Tuple[StyleCB, ...]]:
     regs = []
@@ -506,7 +506,11 @@ def _regs_cbs(
         if rule.include is not None:
             assert rule.match is None
             assert rule.begin is None
-            rule = lookup_include(rule.include[1:])
+            if rule.include == '$self':
+                rules_stack.extend(reversed(grammar.patterns))
+                continue
+            else:
+                rule = grammar.repository[rule.include[1:]]
 
         if rule.match is None and rule.begin is None and rule.patterns:
             rules_stack.extend(reversed(rule.patterns))
@@ -526,14 +530,14 @@ def _regs_cbs(
 
 
 def _entry(
-        lookup_include: Callable[[str], _Rule],
+        grammar: Grammar,
         patterns: Tuple[_Rule, ...],
         end: str,
         scope: Scope,
 ) -> _Entry:
-    regs, cbs = _regs_cbs(lookup_include, patterns)
+    regs, cbs = _regs_cbs(grammar, patterns)
     return Entry(
-        lookup_include,
+        grammar,
         compile_regset(end, *regs),
         (_end_cb, *cbs),
         scope,
@@ -542,14 +546,8 @@ def _entry(
 
 def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
     print(C_BG_TRUE.format(**theme.bg_default._asdict()))
-    state: Tuple[_Entry, ...] = (
-        _entry(
-            grammar.repository.__getitem__,
-            grammar.patterns,
-            ' ^',
-            (grammar.scope_name,),
-        ),
-    )
+    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
+    state: Tuple[_Entry, ...] = (entry,)
     with open(filename) as f:
         for line in f:
             state, regions = _highlight_line(state, line)
@@ -569,14 +567,8 @@ def _draw_screen(
 ) -> None:
     regions_by_line = []
 
-    state: Tuple[_Entry, ...] = (
-        _entry(
-            grammar.repository.__getitem__,
-            grammar.patterns,
-            ' ^',
-            (grammar.scope_name,),
-        ),
-    )
+    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
+    state: Tuple[_Entry, ...] = (entry,)
     for line in lines[:y + curses.LINES]:
         state, regions = _highlight_line(state, line)
         regions_by_line.append(regions)
