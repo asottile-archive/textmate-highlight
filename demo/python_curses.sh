@@ -7,7 +7,7 @@ else
     args=()
 fi
 exec python3 "${args[@]}" "${HERE}/../highlight_demo.py" \
-    highlight \
+    highlight --renderer=curses \
     "${HERE}/themes/dark_plus_vs.json" \
     "${HERE}/languages" \
     "${HERE}/../highlight_demo.py"

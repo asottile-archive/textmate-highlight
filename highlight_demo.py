@@ -3,11 +3,13 @@ import curses
 import functools
 import itertools
 import json
+import os.path
 import plistlib
 import re
 from typing import Any
 from typing import Callable
 from typing import Dict
+from typing import FrozenSet
 from typing import Generator
 from typing import List
 from typing import Match
@@ -295,8 +297,8 @@ class Rule(NamedTuple):
 
 class Grammar(NamedTuple):
     scope_name: str
-    first_line_match: Optional[str]
-    file_types: Tuple[str, ...]
+    first_line_match: Optional[onigurumacffi._Pattern]
+    file_types: FrozenSet[str]
     patterns: Tuple[_Rule, ...]
     repository: Dict[str, _Rule]
 
@@ -308,13 +310,13 @@ class Grammar(NamedTuple):
 
         scope_name = data['scopeName']
         if 'firstLineMatch' in data:
-            first_line_match = data['firstLineMatch']
+            first_line_match = onigurumacffi.compile(data['firstLineMatch'])
         else:
             first_line_match = None
         if 'fileTypes' in data:
-            file_types = tuple(data['fileTypes'])
+            file_types = frozenset(data['fileTypes'])
         else:
-            file_types = ()
+            file_types = frozenset()
         patterns = tuple(Rule.from_dct(dct) for dct in data['patterns'])
         if 'repository' in data:
             repository = {
@@ -329,6 +331,17 @@ class Grammar(NamedTuple):
             patterns=patterns,
             repository=repository,
         )
+
+    def matches_file(self, filename: str) -> bool:
+        _, ext = os.path.splitext(filename)
+        if ext.lstrip('.') in self.file_types:
+            return True
+        elif self.first_line_match is not None:
+            with open(filename) as f:
+                first_line = f.readline()
+            return bool(self.first_line_match.match(first_line))
+        else:
+            return False
 
 
 def print_styled(s: str, style: Style) -> None:
@@ -654,7 +667,7 @@ def main() -> int:
         default='output',
     )
     highlight_parser.add_argument('theme')
-    highlight_parser.add_argument('syntax')
+    highlight_parser.add_argument('syntax_dir')
     highlight_parser.add_argument('filename')
 
     theme_parser = subparsers.add_parser('theme')
@@ -662,9 +675,21 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    for filename in os.listdir(args.syntax_dir):
+        grammar = Grammar.parse(os.path.join(args.syntax_dir, filename))
+        if grammar.matches_file(args.filename):
+            break
+    else:
+        grammar = Grammar(
+            scope_name='source.unknown',
+            first_line_match=None,
+            file_types=frozenset(),
+            patterns=(),
+            repository={},
+        )
+
     if args.command == 'highlight':
         theme = Theme.parse(args.theme)
-        grammar = Grammar.parse(args.syntax)
         if args.renderer == 'output':
             return _highlight_output(theme, grammar, args.filename)
         elif args.renderer == 'curses':
