@@ -375,24 +375,6 @@ class Grammar(NamedTuple):
             return False
 
 
-def print_styled(s: str, style: Style) -> None:
-    color_s = ''
-    undo_s = ''
-    color_s += C_TRUE.format(**style.fg._asdict())
-    color_s += C_BG_TRUE.format(**style.bg._asdict())
-    undo_s += '\x1b[39m'
-    if style.b:
-        color_s += '\x1b[1m'
-        undo_s += '\x1b[22m'
-    if style.i:
-        color_s += '\x1b[3m'
-        undo_s += '\x1b[23m'
-    if style.u:
-        color_s += '\x1b[4m'
-        undo_s += '\x1b[24m'
-    print(f'{color_s}{s}{undo_s}', end='')
-
-
 class Region(NamedTuple):
     start: int
     end: int
@@ -544,19 +526,6 @@ def _entry(
     )
 
 
-def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
-    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
-    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
-    state: Tuple[_Entry, ...] = (entry,)
-    with open(filename) as f:
-        for line in f:
-            state, regions = _highlight_line(state, line)
-            for start, end, scope in regions:
-                print_styled(line[start:end], theme.select(scope))
-    print('\x1b[m', end='')
-    return 0
-
-
 def _draw_screen(
         stdscr: 'curses._CursesWindow',
         curses_colors: Dict[Tuple[Color, Color], int],
@@ -654,6 +623,37 @@ def _highlight_curses(
     return 0
 
 
+def print_styled(s: str, style: Style) -> None:
+    color_s = ''
+    undo_s = ''
+    color_s += C_TRUE.format(**style.fg._asdict())
+    color_s += C_BG_TRUE.format(**style.bg._asdict())
+    undo_s += '\x1b[39m'
+    if style.b:
+        color_s += '\x1b[1m'
+        undo_s += '\x1b[22m'
+    if style.i:
+        color_s += '\x1b[3m'
+        undo_s += '\x1b[23m'
+    if style.u:
+        color_s += '\x1b[4m'
+        undo_s += '\x1b[24m'
+    print(f'{color_s}{s}{undo_s}', end='')
+
+
+def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
+    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
+    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
+    state: Tuple[_Entry, ...] = (entry,)
+    with open(filename) as f:
+        for line in f:
+            state, regions = _highlight_line(state, line)
+            for start, end, scope in regions:
+                print_styled(line[start:end], theme.select(scope))
+    print('\x1b[m', end='')
+    return 0
+
+
 def _theme(theme_filename: str) -> int:
     theme = Theme.parse(theme_filename)
 
@@ -707,12 +707,12 @@ def main() -> int:
 
     if args.command == 'highlight':
         theme = Theme.parse(args.theme)
-        if args.renderer == 'output':
-            return _highlight_output(theme, grammar, args.filename)
-        elif args.renderer == 'curses':
+        if args.renderer == 'curses':
             return curses.wrapper(
                 _highlight_curses, theme, grammar, args.filename,
             )
+        elif args.renderer == 'output':
+            return _highlight_output(theme, grammar, args.filename)
         else:
             raise NotImplementedError(args.renderer)
     elif args.command == 'theme':
