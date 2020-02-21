@@ -93,11 +93,10 @@ class Selector(NamedTuple):
 
     def matches(self, scope: Scope) -> Tuple[bool, int]:
         s = scope[-1]
-        while s:
-            if s == self.s:
-                return (True, s.count('.') + bool(s))
-            s, _, _ = s.rpartition('.')
-        return (False, -1)
+        if self.s == s or s.startswith(f'{self.s}.'):
+            return (True, self.s.count('.'))
+        else:
+            return (False, -1)
 
 
 DEFAULT_SELECTOR = Selector.parse('')
@@ -115,7 +114,7 @@ def _select(
             is_matched, priority = selector.matches(sub_scope)
             if is_matched:
                 matches.append((priority, t))
-        if matches:  # TODO: and len(matches) == 1
+        if matches:
             _, ret = max(matches)
             return ret
 
