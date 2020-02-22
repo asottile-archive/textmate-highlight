@@ -208,6 +208,9 @@ class Theme(NamedTuple):
         )
 
 
+Captures = Tuple[Tuple[int, '_Rule'], ...]
+
+
 class _Rule(Protocol):
     """hax for recursive types python/mypy#731"""
     @property
@@ -221,11 +224,11 @@ class _Rule(Protocol):
     @property
     def content_name(self) -> Optional[str]: ...
     @property
-    def captures(self) -> Tuple[Tuple[int, '_Rule'], ...]: ...
+    def captures(self) -> Captures: ...
     @property
-    def begin_captures(self) -> Tuple[Tuple[int, '_Rule'], ...]: ...
+    def begin_captures(self) -> Captures: ...
     @property
-    def end_captures(self) -> Tuple[Tuple[int, '_Rule'], ...]: ...
+    def end_captures(self) -> Captures: ...
     @property
     def include(self) -> Optional[str]: ...
     @property
@@ -238,9 +241,9 @@ class Rule(NamedTuple):
     begin: Optional[str]
     end: Optional[str]
     content_name: Optional[str]
-    captures: Tuple[Tuple[int, _Rule], ...]
-    begin_captures: Tuple[Tuple[int, _Rule], ...]
-    end_captures: Tuple[Tuple[int, _Rule], ...]
+    captures: Captures
+    begin_captures: Captures
+    end_captures: Captures
     include: Optional[str]
     patterns: Tuple[_Rule, ...]
 
@@ -379,10 +382,6 @@ class Region(NamedTuple):
     end: int
     scope: Scope
 
-    @classmethod
-    def from_match(cls, match: Match[str], scope: Scope) -> 'Region':
-        return cls(match.start(), match.end(), scope)
-
 
 Regions = Tuple[Region, ...]
 State = Tuple['_Entry', ...]
@@ -431,15 +430,67 @@ def _highlight_line(state: State, line: str) -> Tuple[State, Regions]:
     return state, tuple(ret)
 
 
-def _end_cb(match: Match[str], state: State) -> Tuple[State, Regions]:
-    return state[:-1], (Region.from_match(match, state[-1].scope),)
+def _expand_captures(
+        scope: Scope,
+        match: Match[str],
+        captures: Captures,
+) -> Regions:
+    ret: List[Region] = []
+    pos, pos_end = match.span()
+    for i, rule in captures:
+        try:
+            group_s = match[i]
+        except IndexError:  # some grammars are malformed here?
+            continue
+        if not group_s:
+            continue
+
+        start, end = match.span(i)
+        if start < pos:
+            # TODO: could maybe bisect but this is probably fast enough
+            j = len(ret) - 1
+            while j > 0 and start < ret[j - 1].end:
+                j -= 1
+
+            oldtok = ret[j]
+            newtok = []
+            if start > oldtok.start:
+                newtok.append(oldtok._replace(end=start))
+
+            # TODO: this is duplicated below
+            if not rule.match and not rule.begin and not rule.include:
+                assert rule.name is not None
+                newtok.append(Region(start, end, (*oldtok.scope, rule.name)))
+            else:
+                raise NotImplementedError('complex capture rule')
+
+            if end < oldtok.end:
+                newtok.append(oldtok._replace(start=end))
+            ret[j:j + 1] = newtok
+        else:
+            if start > pos:
+                ret.append(Region(pos, start, scope))
+
+            if not rule.match and not rule.begin and not rule.include:
+                assert rule.name is not None
+                ret.append(Region(start, end, (*scope, rule.name)))
+            else:
+                raise NotImplementedError('complex capture rule')
+
+            pos = end
+
+    if pos < pos_end:
+        ret.append(Region(pos, pos_end, scope))
+    return tuple(ret)
 
 
-def _match_cb_no_name(
+def _end_cb(
         match: Match[str],
         state: State,
+        *,
+        end_captures: Captures,
 ) -> Tuple[State, Regions]:
-    return state, (Region.from_match(match, state[-1].scope),)
+    return state[:-1], _expand_captures(state[-1].scope, match, end_captures)
 
 
 def _match_cb(
@@ -448,8 +499,11 @@ def _match_cb(
         *,
         rule: _Rule,
 ) -> Tuple[State, Regions]:
-    assert rule.name is not None
-    return state, (Region.from_match(match, (*state[-1].scope, rule.name)),)
+    if rule.name is not None:
+        scope = (*state[-1].scope, rule.name)
+    else:
+        scope = state[-1].scope
+    return state, _expand_captures(scope, match, rule.captures)
 
 
 def _begin_cb(
@@ -460,15 +514,22 @@ def _begin_cb(
 ) -> Tuple[State, Regions]:
     assert rule.end is not None
     prev_entry = state[-1]
+
     if rule.name is not None:
-        next_scopes = (*prev_entry.scope, rule.name)
+        scope = (*prev_entry.scope, rule.name)
     else:
-        next_scopes = prev_entry.scope
+        scope = prev_entry.scope
+    if rule.content_name is not None:
+        next_scopes = (*scope, rule.content_name)
+    else:
+        next_scopes = scope
 
     end = match.expand(rule.end)
-    entry = _entry(prev_entry.grammar, rule.patterns, end, next_scopes)
+    entry = _entry(
+        prev_entry.grammar, rule.patterns, end, rule.end_captures, next_scopes,
+    )
 
-    return (*state, entry), (Region.from_match(match, next_scopes),)
+    return (*state, entry), _expand_captures(scope, match, rule.begin_captures)
 
 
 @functools.lru_cache(maxsize=None)
@@ -497,10 +558,7 @@ def _regs_cbs(
             rules_stack.extend(reversed(rule.patterns))
         elif rule.match is not None:
             regs.append(rule.match)
-            if rule.name is None:
-                cbs.append(_match_cb_no_name)
-            else:
-                cbs.append(functools.partial(_match_cb, rule=rule))
+            cbs.append(functools.partial(_match_cb, rule=rule))
         elif rule.begin is not None:
             regs.append(rule.begin)
             cbs.append(functools.partial(_begin_cb, rule=rule))
@@ -514,15 +572,12 @@ def _entry(
         grammar: Grammar,
         patterns: Tuple[_Rule, ...],
         end: str,
+        end_captures: Captures,
         scope: Scope,
 ) -> _Entry:
     regs, cbs = _regs_cbs(grammar, patterns)
-    return Entry(
-        grammar,
-        compile_regset(end, *regs),
-        (_end_cb, *cbs),
-        scope,
-    )
+    end_cb = functools.partial(_end_cb, end_captures=end_captures)
+    return Entry(grammar, compile_regset(end, *regs), (end_cb, *cbs), scope)
 
 
 def _draw_screen(
@@ -535,7 +590,7 @@ def _draw_screen(
 ) -> None:
     regions_by_line = []
 
-    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
+    entry = _entry(grammar, grammar.patterns, '$ ', (), (grammar.scope_name,))
     state: Tuple[_Entry, ...] = (entry,)
     for line in lines[:y + curses.LINES]:
         state, regions = _highlight_line(state, line)
@@ -642,7 +697,7 @@ def print_styled(s: str, style: Style) -> None:
 
 def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
     print(C_BG_TRUE.format(**theme.bg_default._asdict()))
-    entry = _entry(grammar, grammar.patterns, ' ^', (grammar.scope_name,))
+    entry = _entry(grammar, grammar.patterns, '$ ', (), (grammar.scope_name,))
     state: Tuple[_Entry, ...] = (entry,)
     with open(filename) as f:
         for line in f:
