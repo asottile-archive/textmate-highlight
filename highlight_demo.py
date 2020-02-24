@@ -88,6 +88,13 @@ class Style(NamedTuple):
     i: bool
     u: bool
 
+    @classmethod
+    def blank(cls) -> 'Style':
+        return cls(
+            fg=Color(0xff, 0xff, 0xff), bg=Color(0x00, 0x00, 0x00),
+            b=False, u=False, i=False,
+        )
+
 
 class PartialStyle(NamedTuple):
     fg: Optional[Color] = None
@@ -160,11 +167,7 @@ class Theme(NamedTuple):
     def from_dct(cls, data: Dict[str, Any]) -> 'Theme':
         root: Dict[str, Any] = {'children': {}}
 
-        default: Dict[str, Any] = {
-            'fg': Color(0xff, 0xff, 0xff),
-            'bg': Color(0x00, 0x00, 0x00),
-            'b': False, 'u': False, 'i': False,
-        }
+        default = Style.blank()._asdict()
 
         for k in ('foreground', 'editor.foreground'):
             if k in data['colors']:
