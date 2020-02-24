@@ -7,7 +7,6 @@ else
     args=()
 fi
 exec python3 "${args[@]}" "${HERE}/../highlight_demo.py" \
-    highlight \
     "${HERE}/themes/dark_plus_vs.json" \
     "${HERE}/languages" \
     "${HERE}/files/part2.ps1"

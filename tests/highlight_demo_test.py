@@ -1,35 +1,36 @@
 import pytest
 
-from highlight_demo import _select
-from highlight_demo import Selector
+from highlight_demo import Color
+from highlight_demo import Theme
+
+THEME = Theme.from_dct({
+    'colors': {'foreground': '#100000', 'background': '#aaaaaa'},
+    'tokenColors': [
+        {'scope': 'foo.bar', 'settings': {'foreground': '#200000'}},
+        {'scope': 'foo', 'settings': {'foreground': '#300000'}},
+        {'scope': 'parent foo.bar', 'settings': {'foreground': '#400000'}},
+    ],
+})
 
 
-RULES = (
-    (Selector.parse('foo.bar'), 'foo bar selector'),
-    (Selector.parse('foo'), 'foo selector'),
-    (Selector.parse('foo bar'), 'foo bar descendant selector'),
-    (Selector.parse('foo > bar'), 'foo bar child selector'),
-    (Selector.parse('foo - bar'), 'foo bar negation selector'),
-    (Selector.parse('*wc*'), 'wc wildcard selector'),
-)
+def unhex(color):
+    return f'#{hex(color.r << 16 | color.g << 8 | color.b)[2:]}'
 
 
 @pytest.mark.parametrize(
     ('scope', 'expected'),
     (
-        pytest.param(('',), 'trivial selector', id='trivial'),
-        pytest.param(('unknown',), 'trivial selector', id='unknown'),
-        pytest.param(('foo.bar',), 'foo bar selector', id='exact match'),
-        pytest.param(('foo.baz',), 'foo selector', id='prefix match'),
+        pytest.param(('',), '#100000', id='trivial'),
+        pytest.param(('unknown',), '#100000', id='unknown'),
+        pytest.param(('foo.bar',), '#200000', id='exact match'),
+        pytest.param(('foo.baz',), '#300000', id='prefix match'),
+        pytest.param(('src.diff', 'foo.bar'), '#200000', id='nested scope'),
         pytest.param(
-            ('src.diff', 'foo.bar'), 'foo bar selector',
-            id='nested scope',
-        ),
-        pytest.param(
-            ('foo.bar', 'unrelated'), 'foo bar selector',
+            ('foo.bar', 'unrelated'), '#200000',
             id='nested scope not last one',
         ),
     ),
 )
 def test_select(scope, expected):
-    assert _select(scope, RULES, 'trivial selector') == expected
+    ret = THEME.select(scope)
+    assert unhex(ret.fg) == unhex(Color.parse(expected))

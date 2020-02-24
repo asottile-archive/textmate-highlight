@@ -1,5 +1,4 @@
 import argparse
-import curses
 import functools
 import itertools
 import json
@@ -10,7 +9,6 @@ from typing import Any
 from typing import Callable
 from typing import Dict
 from typing import FrozenSet
-from typing import Generator
 from typing import Generic
 from typing import List
 from typing import Match
@@ -43,6 +41,21 @@ C_RESET = '\x1b[m'
 UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
 
 
+class FDict(Generic[TKey, TValue]):
+    def __init__(self, dct: Dict[TKey, TValue]) -> None:
+        self._hash = hash(tuple(sorted(dct.items())))
+        self._dct = dct
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __getitem__(self, k: TKey) -> TValue:
+        return self._dct[k]
+
+    def __contains__(self, k: TKey) -> bool:
+        return k in self._dct
+
+
 class Color(NamedTuple):
     r: int
     g: int
@@ -51,13 +64,6 @@ class Color(NamedTuple):
     @classmethod
     def parse(cls, s: str) -> 'Color':
         return cls(r=int(s[1:3], 16), g=int(s[3:5], 16), b=int(s[5:7], 16))
-
-    def as_curses(self) -> Tuple[int, int, int]:
-        return (
-            int(1000 * self.r / 255),
-            int(1000 * self.g / 255),
-            int(1000 * self.b / 255),
-        )
 
 
 def _table_256() -> Dict[Color, int]:
@@ -83,129 +89,125 @@ class Style(NamedTuple):
     u: bool
 
 
-class Selector(NamedTuple):
-    # TODO: parts: Tuple[str, ...]
-    s: str
+class PartialStyle(NamedTuple):
+    fg: Optional[Color] = None
+    bg: Optional[Color] = None
+    b: Optional[bool] = None
+    u: Optional[bool] = None
+    i: Optional[bool] = None
+
+    def overlay_on(self, dct: Dict[str, Any]) -> None:
+        for attr in self._fields:
+            value = getattr(self, attr)
+            if value is not None:
+                dct[attr] = value
 
     @classmethod
-    def parse(cls, s: str) -> 'Selector':
-        return cls(s)
+    def from_dct(cls, dct: Dict[str, Any]) -> 'PartialStyle':
+        kv = cls()._asdict()
+        if 'foreground' in dct:
+            kv['fg'] = Color.parse(dct['foreground'])
+        if 'background' in dct:
+            kv['bg'] = Color.parse(dct['background'])
+        if dct.get('fontStyle') == 'bold':
+            kv['b'] = True
+        elif dct.get('fontStyle') == 'italic':
+            kv['i'] = True
+        elif dct.get('fontStyle') == 'underline':
+            kv['u'] = True
+        return cls(**kv)
 
-    def matches(self, scope: Scope) -> Tuple[bool, int]:
-        s = scope[-1]
-        if self.s == s or s.startswith(f'{self.s}.'):
-            return (True, self.s.count('.'))
-        else:
-            return (False, -1)
+
+class _ThemeTrieNode(Protocol):
+    @property
+    def style(self) -> PartialStyle: ...
+    @property
+    def children(self) -> FDict[str, '_ThemeTrieNode']: ...
 
 
-DEFAULT_SELECTOR = Selector.parse('')
+class ThemeTrieNode(NamedTuple):
+    style: PartialStyle
+    children: FDict[str, _ThemeTrieNode]
 
-
-def _select(
-        scope: Scope,
-        rules: Tuple[Tuple[Selector, T], ...],
-        default: T,
-) -> T:
-    for scope_len in range(len(scope), 0, -1):
-        sub_scope = scope[:scope_len]
-        matches = []
-        for selector, t in rules:
-            is_matched, priority = selector.matches(sub_scope)
-            if is_matched:
-                matches.append((priority, t))
-        if matches:
-            _, ret = max(matches)
-            return ret
-
-    return default
+    @classmethod
+    def from_dct(cls, dct: Dict[str, Any]) -> _ThemeTrieNode:
+        children = FDict({
+            k: ThemeTrieNode.from_dct(v) for k, v in dct['children'].items()
+        })
+        return cls(PartialStyle.from_dct(dct), children)
 
 
 class Theme(NamedTuple):
-    fg_default: Color
-    bg_default: Color
-    b_default: bool
-    i_default: bool
-    u_default: bool
-    fg_rules: Tuple[Tuple[Selector, Color], ...]
-    bg_rules: Tuple[Tuple[Selector, Color], ...]
-    b_rules: Tuple[Tuple[Selector, bool], ...]
-    i_rules: Tuple[Tuple[Selector, bool], ...]
-    u_rules: Tuple[Tuple[Selector, bool], ...]
+    default: Style
+    rules: _ThemeTrieNode
+
+    @functools.lru_cache(maxsize=None)
+    def select(self, scope: Scope) -> Style:
+        if not scope:
+            return self.default
+        else:
+            style = self.select(scope[:-1])._asdict()
+            node = self.rules
+            for part in scope[-1].split('.'):
+                if part not in node.children:
+                    break
+                else:
+                    node = node.children[part]
+                    node.style.overlay_on(style)
+            return Style(**style)
+
+    @classmethod
+    def from_dct(cls, data: Dict[str, Any]) -> 'Theme':
+        root: Dict[str, Any] = {'children': {}}
+
+        default: Dict[str, Any] = {
+            'fg': Color(0xff, 0xff, 0xff),
+            'bg': Color(0x00, 0x00, 0x00),
+            'b': False, 'u': False, 'i': False,
+        }
+
+        for k in ('foreground', 'editor.foreground'):
+            if k in data['colors']:
+                default['fg'] = Color.parse(data['colors'][k])
+                break
+
+        for k in ('background', 'editor.background'):
+            if k in data['colors']:
+                default['bg'] = Color.parse(data['colors'][k])
+                break
+
+        for rule in data['tokenColors']:
+            if 'scope' not in rule:
+                scopes = ['']
+            elif isinstance(rule['scope'], str):
+                scopes = [
+                    s.strip() for s in rule['scope'].split(',')
+                    # some themes have a buggy trailing comma
+                    if s.strip()
+                ]
+            else:
+                scopes = rule['scope']
+
+            for scope in scopes:
+                if ' ' in scope:
+                    # TODO: implement parent scopes
+                    continue
+                elif scope == '':
+                    PartialStyle.from_dct(rule['settings']).overlay_on(default)
+
+                cur = root
+                for part in scope.split('.'):
+                    cur = cur['children'].setdefault(part, {'children': {}})
+
+                cur.update(rule['settings'])
+
+        return cls(Style(**default), ThemeTrieNode.from_dct(root))
 
     @classmethod
     def parse(cls, filename: str) -> 'Theme':
         with open(filename) as f:
             contents = UN_COMMENT.sub('', f.read())
-            data = json.loads(contents)
-
-        fg_d = {DEFAULT_SELECTOR: Color(0xff, 0xff, 0xff)}
-        bg_d = {DEFAULT_SELECTOR: Color(0x00, 0x00, 0x00)}
-        b_d = {DEFAULT_SELECTOR: False}
-        i_d = {DEFAULT_SELECTOR: False}
-        u_d = {DEFAULT_SELECTOR: False}
-
-        for k in ('foreground', 'editor.foreground'):
-            if k in data['colors']:
-                fg_d[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
-                break
-
-        for k in ('background', 'editor.background'):
-            if k in data['colors']:
-                bg_d[DEFAULT_SELECTOR] = Color.parse(data['colors'][k])
-                break
-
-        for theme_item in data['tokenColors']:
-            if 'scope' not in theme_item:
-                scopes = ['']  # some sort of default scope?
-            elif isinstance(theme_item['scope'], str):
-                scopes = [
-                    s.strip() for s in theme_item['scope'].split(',')
-                    # some themes have a trailing comma -- do they
-                    # intentionally mean to match that? is it a bug? should I
-                    # send a patch?
-                    if s.strip()
-                ]
-            else:
-                scopes = theme_item['scope']
-
-            for scope in scopes:
-                selector = Selector.parse(scope)
-                if 'foreground' in theme_item['settings']:
-                    color = Color.parse(theme_item['settings']['foreground'])
-                    fg_d[selector] = color
-                if 'background' in theme_item['settings']:
-                    color = Color.parse(theme_item['settings']['background'])
-                    bg_d[selector] = color
-                if theme_item['settings'].get('fontStyle') == 'bold':
-                    b_d[selector] = True
-                elif theme_item['settings'].get('fontStyle') == 'italic':
-                    i_d[selector] = True
-                elif theme_item['settings'].get('fontStyle') == 'underline':
-                    u_d[selector] = True
-
-        return cls(
-            fg_default=fg_d.pop(DEFAULT_SELECTOR),
-            bg_default=bg_d.pop(DEFAULT_SELECTOR),
-            b_default=b_d.pop(DEFAULT_SELECTOR),
-            i_default=i_d.pop(DEFAULT_SELECTOR),
-            u_default=u_d.pop(DEFAULT_SELECTOR),
-            fg_rules=tuple(fg_d.items()),
-            bg_rules=tuple(bg_d.items()),
-            b_rules=tuple(b_d.items()),
-            i_rules=tuple(i_d.items()),
-            u_rules=tuple(u_d.items()),
-        )
-
-    @functools.lru_cache(maxsize=None)
-    def select(self, scope: Scope) -> Style:
-        return Style(
-            fg=_select(scope, self.fg_rules, self.fg_default),
-            bg=_select(scope, self.bg_rules, self.bg_default),
-            b=_select(scope, self.b_rules, self.b_default),
-            i=_select(scope, self.i_rules, self.i_default),
-            u=_select(scope, self.u_rules, self.u_default),
-        )
+            return cls.from_dct(json.loads(contents))
 
 
 Captures = Tuple[Tuple[int, '_Rule'], ...]
@@ -304,18 +306,6 @@ class Rule(NamedTuple):
             include=include,
             patterns=patterns,
         )
-
-
-class FDict(Generic[TKey, TValue]):
-    def __init__(self, dct: Dict[TKey, TValue]) -> None:
-        self._hash = hash(tuple(sorted(dct.items())))
-        self._dct = dct
-
-    def __hash__(self) -> int:
-        return self._hash
-
-    def __getitem__(self, k: TKey) -> TValue:
-        return self._dct[k]
 
 
 class Grammar(NamedTuple):
@@ -580,103 +570,6 @@ def _entry(
     return Entry(grammar, compile_regset(end, *regs), (end_cb, *cbs), scope)
 
 
-def _draw_screen(
-        stdscr: 'curses._CursesWindow',
-        curses_colors: Dict[Tuple[Color, Color], int],
-        theme: Theme,
-        grammar: Grammar,
-        lines: List[str],
-        y: int,
-) -> None:
-    regions_by_line = []
-
-    entry = _entry(grammar, grammar.patterns, '$ ', (), (grammar.scope_name,))
-    state: Tuple[_Entry, ...] = (entry,)
-    for line in lines[:y + curses.LINES]:
-        state, regions = _highlight_line(state, line)
-        regions_by_line.append(regions)
-
-    for i in range(curses.LINES):
-        assert y + i < len(lines)
-        stdscr.insstr(i, 0, lines[y + i])
-        for start, end, scope in regions_by_line[y + i]:
-            style = theme.select(scope)
-            pair = curses_colors[(style.bg, style.fg)]
-            stdscr.chgat(i, start, end - start, curses.color_pair(pair))
-
-
-def _make_curses_colors(theme: Theme) -> Dict[Tuple[Color, Color], int]:
-    assert curses.can_change_color()
-
-    all_bgs = {theme.bg_default}.union(dict(theme.bg_rules).values())
-    all_fgs = {theme.fg_default}.union(dict(theme.fg_rules).values())
-
-    colors = {theme.bg_default: 0, theme.fg_default: 7}
-    curses.init_color(0, *theme.bg_default.as_curses())
-    curses.init_color(7, *theme.fg_default.as_curses())
-
-    def _color_id() -> Generator[int, None, None]:
-        """need to skip already assigned colors"""
-        skip = frozenset(colors.values())
-        i = 0
-        while True:
-            i += 1
-            if i not in skip:
-                yield i
-
-    for i, color in zip(_color_id(), all_bgs | all_fgs):
-        curses.init_color(i, *color.as_curses())
-        colors[color] = i
-
-    ret = {(theme.bg_default, theme.fg_default): 0}
-    all_combinations = set(itertools.product(all_bgs, all_fgs))
-    all_combinations.discard((theme.bg_default, theme.fg_default))
-    for i, (bg, fg) in enumerate(all_combinations, 1):
-        curses.init_pair(i, colors[fg], colors[bg])
-        ret[(bg, fg)] = i
-
-    return ret
-
-
-def _highlight_curses(
-        stdscr: 'curses._CursesWindow',
-        theme: Theme,
-        grammar: Grammar,
-        filename: str,
-) -> int:
-    with open(filename) as f:
-        lines = list(f)
-
-    curses_colors = _make_curses_colors(theme)
-
-    y = 0
-    while True:
-        _draw_screen(stdscr, curses_colors, theme, grammar, lines, y)
-
-        wch = stdscr.get_wch()
-        key = wch if isinstance(wch, int) else ord(wch)
-        keyname = curses.keyname(key)
-        if key == curses.KEY_RESIZE:
-            curses.update_lines_cols()
-        elif key == curses.KEY_DOWN:
-            y = min(y + 1, len(lines) - curses.LINES)
-        elif key == curses.KEY_UP:
-            y = max(0, y - 1)
-        elif keyname == b'kEND5':
-            y = len(lines) - curses.LINES
-        elif keyname == b'kHOM5':
-            y = 0
-        elif wch == '"':
-            lines[y] = '"' + lines[y]
-        elif key == curses.KEY_DC:
-            lines[y] = lines[y][1:]
-        elif keyname == b'^X':
-            break
-        else:
-            raise NotImplementedError(wch, key, keyname)
-    return 0
-
-
 def print_styled(s: str, style: Style) -> None:
     color_s = ''
     undo_s = ''
@@ -696,7 +589,7 @@ def print_styled(s: str, style: Style) -> None:
 
 
 def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
-    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
+    print(C_BG_TRUE.format(**theme.default.bg._asdict()))
     entry = _entry(grammar, grammar.patterns, '$ ', (), (grammar.scope_name,))
     state: Tuple[_Entry, ...] = (entry,)
     with open(filename) as f:
@@ -708,47 +601,11 @@ def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
     return 0
 
 
-def _theme(theme_filename: str) -> int:
-    theme = Theme.parse(theme_filename)
-
-    fg_d = dict(theme.fg_rules)
-    bg_d = dict(theme.bg_rules)
-    b_d = dict(theme.b_rules)
-    i_d = dict(theme.i_rules)
-    u_d = dict(theme.u_rules)
-
-    print(C_BG_TRUE.format(**theme.bg_default._asdict()))
-    rules = {DEFAULT_SELECTOR}.union(fg_d, bg_d, b_d, i_d, u_d)
-    for k in sorted(rules):
-        style = Style(
-            fg=fg_d.get(k, theme.fg_default),
-            bg=bg_d.get(k, theme.bg_default),
-            b=b_d.get(k, theme.b_default),
-            i=i_d.get(k, theme.i_default),
-            u=u_d.get(k, theme.u_default),
-        )
-        print_styled(f'{k}\n', style)
-    print('\x1b[m', end='')
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest='command')
-    subparsers.required = True
-
-    highlight_parser = subparsers.add_parser('highlight')
-    highlight_parser.add_argument(
-        '--renderer',
-        choices=('curses', 'output'),
-        default='output',
-    )
-    highlight_parser.add_argument('theme')
-    highlight_parser.add_argument('syntax_dir')
-    highlight_parser.add_argument('filename')
-
-    theme_parser = subparsers.add_parser('theme')
-    theme_parser.add_argument('theme')
+    parser.add_argument('theme')
+    parser.add_argument('syntax_dir')
+    parser.add_argument('filename')
 
     args = parser.parse_args()
 
@@ -759,20 +616,8 @@ def main() -> int:
     else:
         grammar = Grammar.blank()
 
-    if args.command == 'highlight':
-        theme = Theme.parse(args.theme)
-        if args.renderer == 'curses':
-            return curses.wrapper(
-                _highlight_curses, theme, grammar, args.filename,
-            )
-        elif args.renderer == 'output':
-            return _highlight_output(theme, grammar, args.filename)
-        else:
-            raise NotImplementedError(args.renderer)
-    elif args.command == 'theme':
-        return _theme(args.theme)
-    else:
-        raise NotImplementedError(args.command)
+    theme = Theme.parse(args.theme)
+    return _highlight_output(theme, grammar, args.filename)
 
 
 if __name__ == '__main__':
