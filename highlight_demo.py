@@ -216,10 +216,17 @@ class Theme(NamedTuple):
 Captures = Tuple[Tuple[int, '_Rule'], ...]
 
 
+def _split_name(s: Optional[str]) -> Tuple[str, ...]:
+    if s is None:
+        return ()
+    else:
+        return tuple(s.split())
+
+
 class _Rule(Protocol):
     """hax for recursive types python/mypy#731"""
     @property
-    def name(self) -> Optional[str]: ...
+    def name(self) -> Tuple[str, ...]: ...
     @property
     def match(self) -> Optional[str]: ...
     @property
@@ -227,7 +234,7 @@ class _Rule(Protocol):
     @property
     def end(self) -> Optional[str]: ...
     @property
-    def content_name(self) -> Optional[str]: ...
+    def content_name(self) -> Tuple[str, ...]: ...
     @property
     def captures(self) -> Captures: ...
     @property
@@ -241,11 +248,11 @@ class _Rule(Protocol):
 
 
 class Rule(NamedTuple):
-    name: Optional[str]
+    name: Tuple[str, ...]
     match: Optional[str]
     begin: Optional[str]
     end: Optional[str]
-    content_name: Optional[str]
+    content_name: Tuple[str, ...]
     captures: Captures
     begin_captures: Captures
     end_captures: Captures
@@ -254,11 +261,11 @@ class Rule(NamedTuple):
 
     @classmethod
     def from_dct(cls, dct: Dict[str, Any]) -> _Rule:
-        name = dct.get('name')
+        name = _split_name(dct.get('name'))
         match = dct.get('match')
         begin = dct.get('begin')
         end = dct.get('end')
-        content_name = dct.get('contentName')
+        content_name = _split_name(dct.get('contentName'))
 
         if 'captures' in dct:
             captures = tuple(
@@ -452,8 +459,8 @@ def _expand_captures(
 
             # TODO: this is duplicated below
             if not rule.match and not rule.begin and not rule.include:
-                assert rule.name is not None
-                newtok.append(Region(start, end, (*oldtok.scope, rule.name)))
+                assert rule.name
+                newtok.append(Region(start, end, oldtok.scope + rule.name))
             else:
                 raise NotImplementedError('complex capture rule')
 
@@ -465,8 +472,8 @@ def _expand_captures(
                 ret.append(Region(pos, start, scope))
 
             if not rule.match and not rule.begin and not rule.include:
-                assert rule.name is not None
-                ret.append(Region(start, end, (*scope, rule.name)))
+                assert rule.name
+                ret.append(Region(start, end, scope + rule.name))
             else:
                 raise NotImplementedError('complex capture rule')
 
@@ -492,10 +499,7 @@ def _match_cb(
         *,
         rule: _Rule,
 ) -> Tuple[State, Regions]:
-    if rule.name is not None:
-        scope = (*state[-1].scope, rule.name)
-    else:
-        scope = state[-1].scope
+    scope = state[-1].scope + rule.name
     return state, _expand_captures(scope, match, rule.captures)
 
 
@@ -508,14 +512,8 @@ def _begin_cb(
     assert rule.end is not None
     prev_entry = state[-1]
 
-    if rule.name is not None:
-        scope = (*prev_entry.scope, rule.name)
-    else:
-        scope = prev_entry.scope
-    if rule.content_name is not None:
-        next_scopes = (*scope, rule.content_name)
-    else:
-        next_scopes = scope
+    scope = prev_entry.scope + rule.name
+    next_scopes = scope + rule.content_name
 
     end = match.expand(rule.end)
     entry = _entry(
