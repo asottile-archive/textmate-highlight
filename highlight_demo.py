@@ -4,7 +4,6 @@ import functools
 import itertools
 import json
 import os.path
-import plistlib
 import re
 from typing import Any
 from typing import Dict
@@ -344,9 +343,8 @@ class Grammar(NamedTuple):
 
     @classmethod
     def parse(cls, filename: str) -> 'Grammar':
-        with open(filename, 'rb') as f:
-            # https://github.com/python/typeshed/pull/3738
-            data = plistlib.load(f)  # type: ignore
+        with open(filename) as f:
+            data = json.load(f)
 
         scope_name = data['scopeName']
         if 'firstLineMatch' in data:
