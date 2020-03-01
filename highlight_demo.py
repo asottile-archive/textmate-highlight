@@ -31,9 +31,7 @@ TKey = TypeVar('TKey')
 TValue = TypeVar('TValue')
 Scope = Tuple[str, ...]
 Regions = Tuple['Region', ...]
-State = Tuple['Entry', ...]
 Captures = Tuple[Tuple[int, '_Rule'], ...]
-CapturesRef = Tuple[Tuple[int, int], ...]
 
 C_256 = '\x1b[38;5;{c}m'
 C_TRUE = '\x1b[38;2;{r};{g};{b}m'
@@ -398,13 +396,41 @@ class Region(NamedTuple):
     scope: Scope
 
 
+class State(NamedTuple):
+    entries: Tuple['Entry', ...]
+    while_stack: Tuple[Tuple['WhileRule', int], ...]
+
+    @classmethod
+    def root(cls, entry: 'Entry') -> 'State':
+        return cls((entry,), ())
+
+    @property
+    def cur(self) -> 'Entry':
+        return self.entries[-1]
+
+    def push(self, entry: 'Entry') -> 'State':
+        return self._replace(entries=(*self.entries, entry))
+
+    def pop(self) -> 'State':
+        return self._replace(entries=self.entries[:-1])
+
+    def push_while(self, rule: 'WhileRule', entry: 'Entry') -> 'State':
+        entries = (*self.entries, entry)
+        while_stack = (*self.while_stack, (rule, len(entries)))
+        return self._replace(entries=entries, while_stack=while_stack)
+
+    def pop_while(self) -> 'State':
+        entries, while_stack = self.entries[:-1], self.while_stack[:-1]
+        return self._replace(entries=entries, while_stack=while_stack)
+
+
 class CompiledRule(Protocol):
     @property
     def name(self) -> Tuple[str, ...]: ...
 
     def start(
             self,
-            compiled: 'LazyGrammar',
+            compiler: 'Compiler',
             match: Match[str],
             state: State,
     ) -> Tuple[State, Regions]:
@@ -412,11 +438,11 @@ class CompiledRule(Protocol):
 
     def search(
             self,
-            compiled: 'LazyGrammar',
+            compiler: 'Compiler',
             state: State,
             line: str,
             pos: int,
-    ) -> Tuple[State, int, Regions]:
+    ) -> Optional[Tuple[State, int, Regions]]:
         ...
 
 
@@ -424,14 +450,14 @@ class CompiledRegsetRule(CompiledRule, Protocol):
     @property
     def regset(self) -> onigurumacffi._RegSet: ...
     @property
-    def rule_ids(self) -> Tuple[int, ...]: ...
+    def u_rules(self) -> Tuple[_Rule, ...]: ...
 
 
 class CompiledBeginRule(CompiledRule, Protocol):
     @property
     def content_name(self) -> Tuple[str, ...]: ...
     @property
-    def begin_captures(self) -> CapturesRef: ...
+    def begin_captures(self) -> Captures: ...
 
 
 class Entry(NamedTuple):
@@ -441,28 +467,28 @@ class Entry(NamedTuple):
 
 
 def _inner_capture_parse(
-        rules: 'LazyGrammar',
+        compiler: 'Compiler',
         start: int,
         s: str,
         scope: Scope,
         rule: CompiledRule,
 ) -> Regions:
-    state = (Entry(scope + rule.name, rule, None),)
-    _, regions = _highlight_line(rules, state, s)
+    state = State.root(Entry(scope + rule.name, rule, None))
+    _, regions = _highlight_line(compiler, state, s)
     return tuple(
         r._replace(start=r.start + start, end=r.end + start) for r in regions
     )
 
 
 def _captures(
-        rules: 'LazyGrammar',
+        compiler: 'Compiler',
         scope: Scope,
         match: Match[str],
-        captures: CapturesRef,
+        captures: Captures,
 ) -> Regions:
     ret: List[Region] = []
     pos, pos_end = match.span()
-    for i, rule_id in captures:
+    for i, u_rule in captures:
         try:
             group_s = match[i]
         except IndexError:  # some grammars are malformed here?
@@ -470,7 +496,7 @@ def _captures(
         if not group_s:
             continue
 
-        rule = rules[rule_id]
+        rule = compiler.compile_rule(u_rule)
         start, end = match.span(i)
         if start < pos:
             # TODO: could maybe bisect but this is probably fast enough
@@ -485,7 +511,7 @@ def _captures(
 
             newtok.extend(
                 _inner_capture_parse(
-                    rules, start, match[i], oldtok.scope, rule,
+                    compiler, start, match[i], oldtok.scope, rule,
                 ),
             )
 
@@ -497,7 +523,7 @@ def _captures(
                 ret.append(Region(pos, start, scope))
 
             ret.extend(
-                _inner_capture_parse(rules, start, match[i], scope, rule),
+                _inner_capture_parse(compiler, start, match[i], scope, rule),
             )
 
             pos = end
@@ -511,34 +537,32 @@ def _do_regset(
         idx: int,
         match: Optional[Match[str]],
         rule: CompiledRegsetRule,
-        rules: 'LazyGrammar',
+        compiler: 'Compiler',
         state: State,
-        line: str,
         pos: int,
-) -> Tuple[State, int, Regions]:
+) -> Optional[Tuple[State, int, Regions]]:
+    if match is None:
+        return None
+
     ret = []
-    if match is not None:
-        if match.start() > pos:
-            ret.append(Region(pos, match.start(), state[-1].scope))
+    if match.start() > pos:
+        ret.append(Region(pos, match.start(), state.cur.scope))
 
-        state, regions = rules[rule.rule_ids[idx]].start(rules, match, state)
+    target_rule = compiler.compile_rule(rule.u_rules[idx])
+    state, regions = target_rule.start(compiler, match, state)
+    ret.extend(regions)
 
-        ret.extend(regions)
-        pos = match.end()
-    else:
-        ret.append(Region(pos, len(line), state[-1].scope))
-        pos = len(line)
-    return state, pos, tuple(ret)
+    return state, match.end(), tuple(ret)
 
 
 class PatternRule(NamedTuple):
     name: Tuple[str, ...]
     regset: onigurumacffi._RegSet
-    rule_ids: Tuple[int, ...]
+    u_rules: Tuple[_Rule, ...]
 
     def start(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             match: Match[str],
             state: State,
     ) -> Tuple[State, Regions]:
@@ -546,275 +570,290 @@ class PatternRule(NamedTuple):
 
     def search(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             state: State,
             line: str,
             pos: int,
-    ) -> Tuple[State, int, Regions]:
+    ) -> Optional[Tuple[State, int, Regions]]:
         idx, match = self.regset.search(line, pos)
-        return _do_regset(idx, match, self, rules, state, line, pos)
+        return _do_regset(idx, match, self, compiler, state, pos)
 
 
 class MatchRule(NamedTuple):
     name: Tuple[str, ...]
-    captures: CapturesRef
+    captures: Captures
 
     def start(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             match: Match[str],
             state: State,
     ) -> Tuple[State, Regions]:
-        scope = state[-1].scope + self.name
-        return state, _captures(rules, scope, match, self.captures)
+        scope = state.cur.scope + self.name
+        return state, _captures(compiler, scope, match, self.captures)
 
     def search(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             state: State,
             line: str,
             pos: int,
-    ) -> Tuple[State, int, Regions]:
+    ) -> Optional[Tuple[State, int, Regions]]:
         raise AssertionError(f'unreachable {self}')
 
 
-def _begin_start(
-        rule: CompiledBeginRule,
-        rules: 'LazyGrammar',
-        match: Match[str],
-        state: State,
-        regstr: str,
-) -> Tuple[State, Regions]:
-    scope = state[-1].scope + rule.name
-    next_scope = scope + rule.content_name
-
-    compiled_regex = compile_regex(match.expand(regstr))
-    state = (*state, Entry(next_scope, rule, compiled_regex))
-    return state, _captures(rules, scope, match, rule.begin_captures)
-
-
-class BeginEndRule(NamedTuple):
+class EndRule(NamedTuple):
     name: Tuple[str, ...]
     content_name: Tuple[str, ...]
-    begin_captures: CapturesRef
-    end_captures: CapturesRef
-    begin: onigurumacffi._Pattern
+    begin_captures: Captures
+    end_captures: Captures
     end: str
     regset: onigurumacffi._RegSet
-    rule_ids: Tuple[int, ...]
+    u_rules: Tuple[_Rule, ...]
 
     def start(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             match: Match[str],
             state: State,
     ) -> Tuple[State, Regions]:
-        return _begin_start(self, rules, match, state, self.end)
+        scope = state.cur.scope + self.name
+        next_scope = scope + self.content_name
+
+        end = compile_regex(match.expand(self.end))
+        state = state.push(Entry(next_scope, self, end))
+        return state, _captures(compiler, scope, match, self.begin_captures)
 
     def search(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             state: State,
             line: str,
             pos: int,
-    ) -> Tuple[State, int, Regions]:
+    ) -> Optional[Tuple[State, int, Regions]]:
         def _end_ret() -> Tuple[State, int, Regions]:
             ret = []
             if end_match.start() > pos:
-                ret.append(Region(pos, end_match.start(), state[-1].scope))
+                ret.append(Region(pos, end_match.start(), state.cur.scope))
             ret.extend(
                 _captures(
-                    rules, state[-1].scope, end_match, self.end_captures,
+                    compiler, state.cur.scope, end_match, self.end_captures,
                 ),
             )
-            return state[:-1], end_match.end(), tuple(ret)
+            return state.pop(), end_match.end(), tuple(ret)
 
-        end_match = state[-1].reg.search(line, pos)
+        end_match = state.cur.reg.search(line, pos)
         if end_match is not None and end_match.start() == pos:
             return _end_ret()
         elif end_match is None:
             idx, match = self.regset.search(line, pos)
-            return _do_regset(idx, match, self, rules, state, line, pos)
+            return _do_regset(idx, match, self, compiler, state, pos)
         else:
             idx, match = self.regset.search(line, pos)
             if match is None or end_match.start() < match.start():
                 return _end_ret()
             else:
-                return _do_regset(idx, match, self, rules, state, line, pos)
+                return _do_regset(idx, match, self, compiler, state, pos)
 
 
-class BeginWhileRule(NamedTuple):
+class WhileRule(NamedTuple):
     name: Tuple[str, ...]
     content_name: Tuple[str, ...]
-    begin_captures: CapturesRef
-    while_captures: CapturesRef
-    begin: onigurumacffi._Pattern
+    begin_captures: Captures
+    while_captures: Captures
     while_: str
     regset: onigurumacffi._RegSet
-    rule_ids: Tuple[int, ...]
+    u_rules: Tuple[_Rule, ...]
 
     def start(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             match: Match[str],
             state: State,
     ) -> Tuple[State, Regions]:
-        return _begin_start(self, rules, match, state, self.while_)
+        scope = state.cur.scope + self.name
+        next_scope = scope + self.content_name
 
-    def search(
+        while_ = compile_regex(match.expand(self.while_))
+        state = state.push_while(self, Entry(next_scope, self, while_))
+        return state, _captures(compiler, scope, match, self.begin_captures)
+
+    def continues(
             self,
-            rules: 'LazyGrammar',
+            compiler: 'Compiler',
             state: State,
             line: str,
             pos: int,
-    ) -> Tuple[State, int, Regions]:
-        ret: Regions = ()
-        if pos == 0:
-            while_match = state[-1].reg.match(line)
-            if while_match is None:
-                return state[:-1], pos, ()
-            else:
-                ret = _captures(
-                    rules, state[-1].scope, while_match, self.while_captures,
-                )
-                pos = while_match.end()
+    ) -> Optional[Tuple[int, Regions]]:
+        match = state.cur.reg.match(line, pos)
+        if match is None:
+            return None
 
+        ret = _captures(compiler, state.cur.scope, match, self.while_captures)
+        return match.end(), ret
+
+    def search(
+            self,
+            compiler: 'Compiler',
+            state: State,
+            line: str,
+            pos: int,
+    ) -> Optional[Tuple[State, int, Regions]]:
         idx, match = self.regset.search(line, pos)
-        regset_ret = _do_regset(idx, match, self, rules, state, line, pos)
-        state, pos, regions = regset_ret
-        return state, pos, ret + regions
+        return _do_regset(idx, match, self, compiler, state, pos)
 
 
-@functools.lru_cache(maxsize=None)
-def _expand_include(
-        grammar: Grammar,
-        s: str,
-) -> Tuple[List[str], List[_Rule]]:
-    if s == '$self':
-        return _expand_patterns(grammar, grammar.patterns)
-    else:
-        return _expand_patterns(grammar, (grammar.repository[s[1:]],))
+class Compiler:
+    def __init__(self, grammars: List[Grammar]) -> None:
+        self._scope_to_grammar = {g.scope_name: g for g in grammars}
+        self._rule_to_grammar: Dict[_Rule, Grammar] = {}
+        self._roots: Dict[Grammar, PatternRule] = {}
+        self._c_rules: Dict[_Rule, CompiledRule] = {}
 
+    def _visit_rule(self, grammar: Grammar, rule: _Rule) -> _Rule:
+        self._rule_to_grammar[rule] = grammar
+        return rule
 
-@functools.lru_cache(maxsize=None)
-def _expand_patterns(
-        grammar: Grammar,
-        rules: Tuple[_Rule, ...],
-) -> Tuple[List[str], List[_Rule]]:
-    ret_regs, ret_rules = [], []
-    for rule in rules:
-        if rule.include is not None:
-            inner_regs, inner_rules = _expand_include(grammar, rule.include)
-            ret_regs.extend(inner_regs)
-            ret_rules.extend(inner_rules)
-        elif rule.match is None and rule.begin is None and rule.patterns:
-            inner_regs, inner_rules = _expand_patterns(grammar, rule.patterns)
-            ret_regs.extend(inner_regs)
-            ret_rules.extend(inner_rules)
-        elif rule.match is not None:
-            ret_regs.append(rule.match)
-            ret_rules.append(rule)
-        elif rule.begin is not None:
-            ret_regs.append(rule.begin)
-            ret_rules.append(rule)
+    @functools.lru_cache(maxsize=None)
+    def _include(
+            self,
+            grammar: Grammar,
+            s: str,
+    ) -> Tuple[List[str], Tuple[_Rule, ...]]:
+        # TODO: $base (C does this) (google: `"$base" textmate grammar`)
+        if s == '$self':
+            return self._patterns(grammar, grammar.patterns)
+        elif s.startswith('#'):
+            return self._patterns(grammar, (grammar.repository[s[1:]],))
+        elif '#' not in s:
+            return self._include(self._scope_to_grammar[s], '$self')
         else:
-            raise AssertionError(f'unreachable {rule}')
-    return ret_regs, ret_rules
+            scope, _, s = s.partition('#')
+            return self._include(self._scope_to_grammar[scope], f'#{s}')
 
+    @functools.lru_cache(maxsize=None)
+    def _patterns(
+            self,
+            grammar: Grammar,
+            rules: Tuple[_Rule, ...],
+    ) -> Tuple[List[str], Tuple[_Rule, ...]]:
+        ret_regs = []
+        ret_rules: List[_Rule] = []
+        for rule in rules:
+            if rule.include is not None:
+                tmp_regs, tmp_rules = self._include(grammar, rule.include)
+                ret_regs.extend(tmp_regs)
+                ret_rules.extend(tmp_rules)
+            elif rule.match is None and rule.begin is None and rule.patterns:
+                tmp_regs, tmp_rules = self._patterns(grammar, rule.patterns)
+                ret_regs.extend(tmp_regs)
+                ret_rules.extend(tmp_rules)
+            elif rule.match is not None:
+                ret_regs.append(rule.match)
+                ret_rules.append(self._visit_rule(grammar, rule))
+            elif rule.begin is not None:
+                ret_regs.append(rule.begin)
+                ret_rules.append(self._visit_rule(grammar, rule))
+            else:
+                raise AssertionError(f'unreachable {rule}')
+        return ret_regs, tuple(ret_rules)
 
-def _captures_ref(captures: Captures) -> Tuple[List[_Rule], CapturesRef]:
-    rules = [rule for _, rule in captures]
-    captures_ref = tuple((n, id(rule)) for n, rule in captures)
-    return rules, captures_ref
+    def _captures_ref(
+            self,
+            grammar: Grammar,
+            captures: Captures,
+    ) -> Captures:
+        return tuple((n, self._visit_rule(grammar, r)) for n, r in captures)
 
+    def _compile_root(self, grammar: Grammar) -> PatternRule:
+        regs, rules = self._patterns(grammar, grammar.patterns)
+        return PatternRule((grammar.scope_name,), compile_regset(*regs), rules)
 
-def _compile_root(grammar: Grammar) -> Tuple[PatternRule, List[_Rule]]:
-    regs, rules = _expand_patterns(grammar, grammar.patterns)
-    compiled = PatternRule(
-        (grammar.scope_name,),
-        compile_regset(*regs),
-        tuple(id(rule) for rule in rules),
-    )
-    return compiled, rules
+    def _compile_rule(self, grammar: Grammar, rule: _Rule) -> CompiledRule:
+        assert rule.include is None, rule
+        if rule.match is not None:
+            captures_ref = self._captures_ref(grammar, rule.captures)
+            return MatchRule(rule.name, captures_ref)
+        elif rule.begin is not None and rule.end is not None:
+            regs, rules = self._patterns(grammar, rule.patterns)
+            return EndRule(
+                rule.name,
+                rule.content_name,
+                self._captures_ref(grammar, rule.begin_captures),
+                self._captures_ref(grammar, rule.end_captures),
+                rule.end,
+                compile_regset(*regs),
+                rules,
+            )
+        elif rule.begin is not None and rule.while_ is not None:
+            regs, rules = self._patterns(grammar, rule.patterns)
+            return WhileRule(
+                rule.name,
+                rule.content_name,
+                self._captures_ref(grammar, rule.begin_captures),
+                self._captures_ref(grammar, rule.while_captures),
+                rule.while_,
+                compile_regset(*regs),
+                rules,
+            )
+        else:
+            regs, rules = self._patterns(grammar, rule.patterns)
+            return PatternRule(rule.name, compile_regset(*regs), rules)
 
+    def root_for_file(self, filename: str) -> CompiledRule:
+        for grammar in self._scope_to_grammar.values():
+            if grammar.matches_file(filename):
+                break
+        else:
+            grammar = self._scope_to_grammar['source.unknown']
 
-def _compile_rule(
-        grammar: Grammar,
-        rule: _Rule,
-) -> Tuple[CompiledRule, List[_Rule]]:
-    assert rule.include is None, rule
-    if rule.match is not None:
-        rules, captures_ref = _captures_ref(rule.captures)
-        return MatchRule(rule.name, captures_ref), rules
-    elif rule.begin is not None and rule.end is not None:
-        regs, rules = _expand_patterns(grammar, rule.patterns)
-        begin_rules, begin_captures_ref = _captures_ref(rule.begin_captures)
-        end_rules, end_captures_ref = _captures_ref(rule.end_captures)
-        begin_end_rule = BeginEndRule(
-            rule.name,
-            rule.content_name,
-            begin_captures_ref,
-            end_captures_ref,
-            compile_regex(rule.begin),
-            rule.end,
-            compile_regset(*regs),
-            tuple(id(rule) for rule in rules),
-        )
-        return begin_end_rule, rules + begin_rules + end_rules
-    elif rule.begin is not None and rule.while_ is not None:
-        regs, rules = _expand_patterns(grammar, rule.patterns)
-        begin_rules, begin_captures_ref = _captures_ref(rule.begin_captures)
-        while_rules, while_captures_ref = _captures_ref(rule.while_captures)
-        begin_while_rule = BeginWhileRule(
-            rule.name,
-            rule.content_name,
-            begin_captures_ref,
-            while_captures_ref,
-            compile_regex(rule.begin),
-            rule.while_,
-            compile_regset(*regs),
-            tuple(id(rule) for rule in rules),
-        )
-        return begin_while_rule, rules + begin_rules + while_rules
-    else:
-        regs, rules = _expand_patterns(grammar, rule.patterns)
-        compiled = PatternRule(
-            rule.name,
-            compile_regset(*regs),
-            tuple(id(rule) for rule in rules),
-        )
-        return compiled, rules
-
-
-class LazyGrammar:
-    def __init__(self, grammar: Grammar) -> None:
-        self._grammar = grammar
-        self.root, to_parse = _compile_root(grammar)
-        self._c_rules: Dict[int, CompiledRule] = {id(grammar): self.root}
-        self._u_rules = {id(rule): rule for rule in to_parse}
-
-    def __getitem__(self, rule_id: int) -> CompiledRule:
         with contextlib.suppress(KeyError):
-            return self._c_rules[rule_id]
+            return self._roots[grammar]
 
-        ret, to_parse = _compile_rule(self._grammar, self._u_rules[rule_id])
-        self._c_rules[rule_id] = ret
-        for rule in to_parse:
-            self._u_rules[id(rule)] = rule
+        ret = self._roots[grammar] = self._compile_root(grammar)
+        return ret
+
+    def compile_rule(self, rule: _Rule) -> CompiledRule:
+        with contextlib.suppress(KeyError):
+            return self._c_rules[rule]
+
+        grammar = self._rule_to_grammar[rule]
+        ret = self._c_rules[rule] = self._compile_rule(grammar, rule)
         return ret
 
 
 @functools.lru_cache(maxsize=None)
 def _highlight_line(
-        rules: 'LazyGrammar',
+        compiler: 'Compiler',
         state: State,
         line: str,
 ) -> Tuple[State, Regions]:
     ret: List[Region] = []
     pos = 0
-    while pos < len(line):
-        state, pos, regions = state[-1].rule.search(rules, state, line, pos)
+
+    # TODO: this is still a little wasteful
+    while_stack = []
+    for while_rule, idx in state.while_stack:
+        while_stack.append((while_rule, idx))
+        while_state = State(state.entries[:idx], tuple(while_stack))
+
+        while_res = while_rule.continues(compiler, while_state, line, pos)
+        if while_res is None:
+            state = while_state.pop_while()
+            break
+        else:
+            pos, regions = while_res
+            ret.extend(regions)
+
+    search_res = state.cur.rule.search(compiler, state, line, pos)
+    while search_res is not None:
+        state, pos, regions = search_res
         ret.extend(regions)
+
+        search_res = state.cur.rule.search(compiler, state, line, pos)
+
+    if pos < len(line):
+        ret.append(Region(pos, len(line), state.cur.scope))
 
     return state, tuple(ret)
 
@@ -834,17 +873,17 @@ def print_styled(s: str, style: Style) -> None:
     if style.u:
         color_s += '\x1b[4m'
         undo_s += '\x1b[24m'
-    print(f'{color_s}{s}{undo_s}', end='')
+    print(f'{color_s}{s}{undo_s}', end='', flush=True)
 
 
-def _highlight_output(theme: Theme, grammar: Grammar, filename: str) -> int:
-    rules = LazyGrammar(grammar)
-    state: State = (Entry(rules.root.name, rules.root, None),)
+def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
+    root = compiler.root_for_file(filename)
+    state = State.root(Entry(root.name, root, None))
 
     print(C_BG_TRUE.format(**theme.default.bg._asdict()))
     with open(filename) as f:
         for line in f:
-            state, regions = _highlight_line(rules, state, line)
+            state, regions = _highlight_line(compiler, state, line)
             for start, end, scope in regions:
                 print_styled(line[start:end], theme.select(scope))
     print('\x1b[m', end='')
@@ -859,15 +898,16 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    for filename in os.listdir(args.syntax_dir):
-        grammar = Grammar.parse(os.path.join(args.syntax_dir, filename))
-        if grammar.matches_file(args.filename):
-            break
-    else:
-        grammar = Grammar.blank()
-
     theme = Theme.parse(args.theme)
-    return _highlight_output(theme, grammar, args.filename)
+
+    grammars = [
+        Grammar.parse(os.path.join(args.syntax_dir, filename))
+        for filename in os.listdir(args.syntax_dir)
+    ]
+    grammars.append(Grammar.blank())
+    compiler = Compiler(grammars)
+
+    return _highlight_output(theme, compiler, args.filename)
 
 
 if __name__ == '__main__':
