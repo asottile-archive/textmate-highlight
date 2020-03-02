@@ -378,13 +378,11 @@ class Grammar(NamedTuple):
             repository=FDict({}),
         )
 
-    def matches_file(self, filename: str) -> bool:
+    def matches_file(self, filename: str, first_line: str) -> bool:
         _, ext = os.path.splitext(filename)
         if ext.lstrip('.') in self.file_types:
             return True
         elif self.first_line_match is not None:
-            with open(filename) as f:
-                first_line = f.readline()
             return bool(self.first_line_match.match(first_line))
         else:
             return False
@@ -451,13 +449,6 @@ class CompiledRegsetRule(CompiledRule, Protocol):
     def regset(self) -> onigurumacffi._RegSet: ...
     @property
     def u_rules(self) -> Tuple[_Rule, ...]: ...
-
-
-class CompiledBeginRule(CompiledRule, Protocol):
-    @property
-    def content_name(self) -> Tuple[str, ...]: ...
-    @property
-    def begin_captures(self) -> Captures: ...
 
 
 class Entry(NamedTuple):
@@ -704,11 +695,12 @@ class WhileRule(NamedTuple):
 
 
 class Compiler:
-    def __init__(self, grammars: List[Grammar]) -> None:
-        self._scope_to_grammar = {g.scope_name: g for g in grammars}
+    def __init__(self, grammar: Grammar, grammars: Dict[str, Grammar]) -> None:
+        self._root_scope = grammar.scope_name
+        self._grammars = grammars
         self._rule_to_grammar: Dict[_Rule, Grammar] = {}
-        self._roots: Dict[Grammar, PatternRule] = {}
         self._c_rules: Dict[_Rule, CompiledRule] = {}
+        self.root = self._compile_root(grammar)
 
     def _visit_rule(self, grammar: Grammar, rule: _Rule) -> _Rule:
         self._rule_to_grammar[rule] = grammar
@@ -720,16 +712,17 @@ class Compiler:
             grammar: Grammar,
             s: str,
     ) -> Tuple[List[str], Tuple[_Rule, ...]]:
-        # TODO: $base (C does this) (google: `"$base" textmate grammar`)
         if s == '$self':
             return self._patterns(grammar, grammar.patterns)
+        elif s == '$base':
+            return self._include(self._grammars[self._root_scope], '$self')
         elif s.startswith('#'):
             return self._patterns(grammar, (grammar.repository[s[1:]],))
         elif '#' not in s:
-            return self._include(self._scope_to_grammar[s], '$self')
+            return self._include(self._grammars[s], '$self')
         else:
             scope, _, s = s.partition('#')
-            return self._include(self._scope_to_grammar[scope], f'#{s}')
+            return self._include(self._grammars[scope], f'#{s}')
 
     @functools.lru_cache(maxsize=None)
     def _patterns(
@@ -800,25 +793,42 @@ class Compiler:
             regs, rules = self._patterns(grammar, rule.patterns)
             return PatternRule(rule.name, compile_regset(*regs), rules)
 
-    def root_for_file(self, filename: str) -> CompiledRule:
-        for grammar in self._scope_to_grammar.values():
-            if grammar.matches_file(filename):
-                break
-        else:
-            grammar = self._scope_to_grammar['source.unknown']
-
-        with contextlib.suppress(KeyError):
-            return self._roots[grammar]
-
-        ret = self._roots[grammar] = self._compile_root(grammar)
-        return ret
-
     def compile_rule(self, rule: _Rule) -> CompiledRule:
         with contextlib.suppress(KeyError):
             return self._c_rules[rule]
 
         grammar = self._rule_to_grammar[rule]
         ret = self._c_rules[rule] = self._compile_rule(grammar, rule)
+        return ret
+
+
+class Grammars:
+    def __init__(self, grammars: List[Grammar]) -> None:
+        self.grammars = {grammar.scope_name: grammar for grammar in grammars}
+        self._compilers: Dict[Grammar, Compiler] = {}
+
+    @classmethod
+    def from_syntax_dir(cls, syntax_dir: str) -> 'Grammars':
+        grammars = [
+            Grammar.parse(os.path.join(syntax_dir, filename))
+            for filename in os.listdir(syntax_dir)
+        ]
+        grammars.append(Grammar.blank())
+        return cls(grammars)
+
+    def compiler_for_filename(self, filename: str) -> Compiler:
+        with open(filename) as f:
+            first_line = next(f)
+        for grammar in self.grammars.values():
+            if grammar.matches_file(filename, first_line):
+                break
+        else:
+            grammar = self.grammars['source.unknown']
+
+        with contextlib.suppress(KeyError):
+            return self._compilers[grammar]
+
+        ret = self._compilers[grammar] = Compiler(grammar, self.grammars)
         return ret
 
 
@@ -877,8 +887,7 @@ def print_styled(s: str, style: Style) -> None:
 
 
 def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
-    root = compiler.root_for_file(filename)
-    state = State.root(Entry(root.name, root, None))
+    state = State.root(Entry(compiler.root.name, compiler.root, None))
 
     print(C_BG_TRUE.format(**theme.default.bg._asdict()))
     with open(filename) as f:
@@ -900,12 +909,8 @@ def main() -> int:
 
     theme = Theme.parse(args.theme)
 
-    grammars = [
-        Grammar.parse(os.path.join(args.syntax_dir, filename))
-        for filename in os.listdir(args.syntax_dir)
-    ]
-    grammars.append(Grammar.blank())
-    compiler = Compiler(grammars)
+    grammars = Grammars.from_syntax_dir(args.syntax_dir)
+    compiler = grammars.compiler_for_filename(args.filename)
 
     return _highlight_output(theme, compiler, args.filename)
 
