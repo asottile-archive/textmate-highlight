@@ -465,7 +465,7 @@ def _inner_capture_parse(
         rule: CompiledRule,
 ) -> Regions:
     state = State.root(Entry(scope + rule.name, rule, None))
-    _, regions = _highlight_line(compiler, state, s)
+    _, regions = highlight_line(compiler, state, s)
     return tuple(
         r._replace(start=r.start + start, end=r.end + start) for r in regions
     )
@@ -809,31 +809,42 @@ class Grammars:
 
     @classmethod
     def from_syntax_dir(cls, syntax_dir: str) -> 'Grammars':
-        grammars = [
-            Grammar.parse(os.path.join(syntax_dir, filename))
-            for filename in os.listdir(syntax_dir)
-        ]
-        grammars.append(Grammar.blank())
+        grammars = [Grammar.blank()]
+        if os.path.exists(syntax_dir):
+            grammars.extend(
+                Grammar.parse(os.path.join(syntax_dir, filename))
+                for filename in os.listdir(syntax_dir)
+            )
         return cls(grammars)
 
-    def compiler_for_filename(self, filename: str) -> Compiler:
-        with open(filename) as f:
-            first_line = next(f)
-        for grammar in self.grammars.values():
-            if grammar.matches_file(filename, first_line):
-                break
-        else:
-            grammar = self.grammars['source.unknown']
-
+    def _compiler_for_grammar(self, grammar: Grammar) -> Compiler:
         with contextlib.suppress(KeyError):
             return self._compilers[grammar]
 
         ret = self._compilers[grammar] = Compiler(grammar, self.grammars)
         return ret
 
+    def blank_compiler(self) -> Compiler:
+        grammar = self.grammars['source.unknown']
+        return self._compiler_for_grammar(grammar)
+
+    def compiler_for_file(self, filename: str) -> Compiler:
+        if os.path.exists(filename):
+            with open(filename) as f:
+                first_line = next(f)
+        else:
+            first_line = ''
+        for grammar in self.grammars.values():
+            if grammar.matches_file(filename, first_line):
+                break
+        else:
+            grammar = self.grammars['source.unknown']
+
+        return self._compiler_for_grammar(grammar)
+
 
 @functools.lru_cache(maxsize=None)
-def _highlight_line(
+def highlight_line(
         compiler: 'Compiler',
         state: State,
         line: str,
@@ -892,7 +903,7 @@ def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
     print(C_BG_TRUE.format(**theme.default.bg._asdict()))
     with open(filename) as f:
         for line in f:
-            state, regions = _highlight_line(compiler, state, line)
+            state, regions = highlight_line(compiler, state, line)
             for start, end, scope in regions:
                 print_styled(line[start:end], theme.select(scope))
     print('\x1b[m', end='')
@@ -910,7 +921,7 @@ def main() -> int:
     theme = Theme.parse(args.theme)
 
     grammars = Grammars.from_syntax_dir(args.syntax_dir)
-    compiler = grammars.compiler_for_filename(args.filename)
+    compiler = grammars.compiler_for_file(args.filename)
 
     return _highlight_output(theme, compiler, args.filename)
 
