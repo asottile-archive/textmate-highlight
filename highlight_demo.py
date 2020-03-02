@@ -831,7 +831,7 @@ class Grammars:
     def compiler_for_file(self, filename: str) -> Compiler:
         if os.path.exists(filename):
             with open(filename) as f:
-                first_line = next(f)
+                first_line = next(f, '')
         else:
             first_line = ''
         for grammar in self.grammars.values():
