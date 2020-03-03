@@ -641,7 +641,7 @@ class EndRule(NamedTuple):
             return _do_regset(idx, match, self, compiler, state, pos)
         else:
             idx, match = self.regset.search(line, pos)
-            if match is None or end_match.start() < match.start():
+            if match is None or end_match.start() <= match.start():
                 return _end_ret()
             else:
                 return _do_regset(idx, match, self, compiler, state, pos)
