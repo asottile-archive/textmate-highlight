@@ -2,3 +2,8 @@ x: |
     foo bar baz
 y: true
 z: 1.5
+q:
+  r: >
+    some block
+    text here
+  x: not highlighted?

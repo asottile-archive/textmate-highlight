@@ -1,56 +1,36 @@
-import argparse
 import contextlib
 import functools
-import itertools
 import json
 import os.path
 import re
 from typing import Any
 from typing import Dict
 from typing import FrozenSet
-from typing import Generic
 from typing import List
 from typing import Match
 from typing import NamedTuple
 from typing import Optional
 from typing import Tuple
 from typing import TYPE_CHECKING
-from typing import TypeVar
 
-import onigurumacffi
+from highlight_demo.fdict import FDict
+from highlight_demo.reg import _Reg
+from highlight_demo.reg import _RegSet
+from highlight_demo.reg import ERR_REG
+from highlight_demo.reg import make_reg
+from highlight_demo.reg import make_regset
 
 if TYPE_CHECKING:
     from typing import Protocol
 else:
     Protocol = object
 
-compile_regex = functools.lru_cache()(onigurumacffi.compile)
-compile_regset = functools.lru_cache()(onigurumacffi.compile_regset)
-
-TKey = TypeVar('TKey')
-TValue = TypeVar('TValue')
 Scope = Tuple[str, ...]
 Regions = Tuple['Region', ...]
 Captures = Tuple[Tuple[int, '_Rule'], ...]
 
-C_256 = '\x1b[38;5;{c}m'
-C_TRUE = '\x1b[38;2;{r};{g};{b}m'
-C_BG_TRUE = '\x1b[48;2;{r};{g};{b}m'
-C_RESET = '\x1b[m'
-
 # yes I know this is wrong, but it's good enough for now
 UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
-
-
-class FDict(Generic[TKey, TValue]):
-    def __init__(self, dct: Dict[TKey, TValue]) -> None:
-        self._dct = dct
-
-    def __getitem__(self, k: TKey) -> TValue:
-        return self._dct[k]
-
-    def __contains__(self, k: TKey) -> bool:
-        return k in self._dct
 
 
 class Color(NamedTuple):
@@ -61,21 +41,6 @@ class Color(NamedTuple):
     @classmethod
     def parse(cls, s: str) -> 'Color':
         return cls(r=int(s[1:3], 16), g=int(s[3:5], 16), b=int(s[5:7], 16))
-
-
-def _table_256() -> Dict[Color, int]:
-    vals = (0, 95, 135, 175, 215, 255)
-    ret = {
-        Color(r, g, b): 16 + i
-        for i, (r, g, b) in enumerate(itertools.product(vals, vals, vals))
-    }
-    for i in range(24):
-        v = 10 * i + 8
-        ret[Color(v, v, v)] = 232 + i
-    return ret
-
-
-TABLE_256 = _table_256()
 
 
 class Style(NamedTuple):
@@ -89,7 +54,7 @@ class Style(NamedTuple):
     def blank(cls) -> 'Style':
         return cls(
             fg=Color(0xff, 0xff, 0xff), bg=Color(0x00, 0x00, 0x00),
-            b=False, u=False, i=False,
+            b=False, i=False, u=False,
         )
 
 
@@ -97,8 +62,8 @@ class PartialStyle(NamedTuple):
     fg: Optional[Color] = None
     bg: Optional[Color] = None
     b: Optional[bool] = None
-    u: Optional[bool] = None
     i: Optional[bool] = None
+    u: Optional[bool] = None
 
     def overlay_on(self, dct: Dict[str, Any]) -> None:
         for attr in self._fields:
@@ -162,8 +127,6 @@ class Theme(NamedTuple):
 
     @classmethod
     def from_dct(cls, data: Dict[str, Any]) -> 'Theme':
-        root: Dict[str, Any] = {'children': {}}
-
         default = Style.blank()._asdict()
 
         for k in ('foreground', 'editor.foreground'):
@@ -176,6 +139,7 @@ class Theme(NamedTuple):
                 default['bg'] = Color.parse(data['colors'][k])
                 break
 
+        root: Dict[str, Any] = {'children': {}}
         for rule in data['tokenColors']:
             if 'scope' not in rule:
                 scopes = ['']
@@ -194,6 +158,7 @@ class Theme(NamedTuple):
                     continue
                 elif scope == '':
                     PartialStyle.from_dct(rule['settings']).overlay_on(default)
+                    continue
 
                 cur = root
                 for part in scope.split('.'):
@@ -334,19 +299,16 @@ class Rule(NamedTuple):
 
 class Grammar(NamedTuple):
     scope_name: str
-    first_line_match: Optional[onigurumacffi._Pattern]
+    first_line_match: Optional[_Reg]
     file_types: FrozenSet[str]
     patterns: Tuple[_Rule, ...]
     repository: FDict[str, _Rule]
 
     @classmethod
-    def parse(cls, filename: str) -> 'Grammar':
-        with open(filename) as f:
-            data = json.load(f)
-
+    def from_data(cls, data: Dict[str, Any]) -> 'Grammar':
         scope_name = data['scopeName']
         if 'firstLineMatch' in data:
-            first_line_match = compile_regex(data['firstLineMatch'])
+            first_line_match: Optional[_Reg] = make_reg(data['firstLineMatch'])
         else:
             first_line_match = None
         if 'fileTypes' in data:
@@ -369,6 +331,11 @@ class Grammar(NamedTuple):
         )
 
     @classmethod
+    def parse(cls, filename: str) -> 'Grammar':
+        with open(filename) as f:
+            return cls.from_data(json.load(f))
+
+    @classmethod
     def blank(cls) -> 'Grammar':
         return cls(
             scope_name='source.unknown',
@@ -383,7 +350,11 @@ class Grammar(NamedTuple):
         if ext.lstrip('.') in self.file_types:
             return True
         elif self.first_line_match is not None:
-            return bool(self.first_line_match.match(first_line))
+            return bool(
+                self.first_line_match.match(
+                    first_line, 0, first_line=True, boundary=True,
+                ),
+            )
         else:
             return False
 
@@ -431,7 +402,7 @@ class CompiledRule(Protocol):
             compiler: 'Compiler',
             match: Match[str],
             state: State,
-    ) -> Tuple[State, Regions]:
+    ) -> Tuple[State, bool, Regions]:
         ...
 
     def search(
@@ -440,13 +411,15 @@ class CompiledRule(Protocol):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[State, int, Regions]]:
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[State, int, bool, Regions]]:
         ...
 
 
 class CompiledRegsetRule(CompiledRule, Protocol):
     @property
-    def regset(self) -> onigurumacffi._RegSet: ...
+    def regset(self) -> _RegSet: ...
     @property
     def u_rules(self) -> Tuple[_Rule, ...]: ...
 
@@ -454,7 +427,8 @@ class CompiledRegsetRule(CompiledRule, Protocol):
 class Entry(NamedTuple):
     scope: Tuple[str, ...]
     rule: CompiledRule
-    reg: onigurumacffi._Pattern
+    reg: _Reg = ERR_REG
+    boundary: bool = False
 
 
 def _inner_capture_parse(
@@ -464,8 +438,8 @@ def _inner_capture_parse(
         scope: Scope,
         rule: CompiledRule,
 ) -> Regions:
-    state = State.root(Entry(scope + rule.name, rule, None))
-    _, regions = highlight_line(compiler, state, s)
+    state = State.root(Entry(scope + rule.name, rule))
+    _, regions = highlight_line(compiler, state, s, first_line=False)
     return tuple(
         r._replace(start=r.start + start, end=r.end + start) for r in regions
     )
@@ -531,7 +505,7 @@ def _do_regset(
         compiler: 'Compiler',
         state: State,
         pos: int,
-) -> Optional[Tuple[State, int, Regions]]:
+) -> Optional[Tuple[State, int, bool, Regions]]:
     if match is None:
         return None
 
@@ -540,15 +514,15 @@ def _do_regset(
         ret.append(Region(pos, match.start(), state.cur.scope))
 
     target_rule = compiler.compile_rule(rule.u_rules[idx])
-    state, regions = target_rule.start(compiler, match, state)
+    state, boundary, regions = target_rule.start(compiler, match, state)
     ret.extend(regions)
 
-    return state, match.end(), tuple(ret)
+    return state, match.end(), boundary, tuple(ret)
 
 
 class PatternRule(NamedTuple):
     name: Tuple[str, ...]
-    regset: onigurumacffi._RegSet
+    regset: _RegSet
     u_rules: Tuple[_Rule, ...]
 
     def start(
@@ -556,7 +530,7 @@ class PatternRule(NamedTuple):
             compiler: 'Compiler',
             match: Match[str],
             state: State,
-    ) -> Tuple[State, Regions]:
+    ) -> Tuple[State, bool, Regions]:
         raise AssertionError(f'unreachable {self}')
 
     def search(
@@ -565,8 +539,10 @@ class PatternRule(NamedTuple):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[State, int, Regions]]:
-        idx, match = self.regset.search(line, pos)
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[State, int, bool, Regions]]:
+        idx, match = self.regset.search(line, pos, first_line, boundary)
         return _do_regset(idx, match, self, compiler, state, pos)
 
 
@@ -579,9 +555,9 @@ class MatchRule(NamedTuple):
             compiler: 'Compiler',
             match: Match[str],
             state: State,
-    ) -> Tuple[State, Regions]:
+    ) -> Tuple[State, bool, Regions]:
         scope = state.cur.scope + self.name
-        return state, _captures(compiler, scope, match, self.captures)
+        return state, False, _captures(compiler, scope, match, self.captures)
 
     def search(
             self,
@@ -589,7 +565,9 @@ class MatchRule(NamedTuple):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[State, int, Regions]]:
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[State, int, bool, Regions]]:
         raise AssertionError(f'unreachable {self}')
 
 
@@ -599,7 +577,7 @@ class EndRule(NamedTuple):
     begin_captures: Captures
     end_captures: Captures
     end: str
-    regset: onigurumacffi._RegSet
+    regset: _RegSet
     u_rules: Tuple[_Rule, ...]
 
     def start(
@@ -607,13 +585,15 @@ class EndRule(NamedTuple):
             compiler: 'Compiler',
             match: Match[str],
             state: State,
-    ) -> Tuple[State, Regions]:
+    ) -> Tuple[State, bool, Regions]:
         scope = state.cur.scope + self.name
         next_scope = scope + self.content_name
 
-        end = compile_regex(match.expand(self.end))
-        state = state.push(Entry(next_scope, self, end))
-        return state, _captures(compiler, scope, match, self.begin_captures)
+        boundary = match.end() == len(match.string)
+        reg = make_reg(match.expand(self.end))
+        state = state.push(Entry(next_scope, self, reg, boundary))
+        regions = _captures(compiler, scope, match, self.begin_captures)
+        return state, True, regions
 
     def search(
             self,
@@ -621,28 +601,28 @@ class EndRule(NamedTuple):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[State, int, Regions]]:
-        def _end_ret() -> Tuple[State, int, Regions]:
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[State, int, bool, Regions]]:
+        def _end_ret(m: Match[str]) -> Tuple[State, int, bool, Regions]:
             ret = []
-            if end_match.start() > pos:
-                ret.append(Region(pos, end_match.start(), state.cur.scope))
+            if m.start() > pos:
+                ret.append(Region(pos, m.start(), state.cur.scope))
             ret.extend(
-                _captures(
-                    compiler, state.cur.scope, end_match, self.end_captures,
-                ),
+                _captures(compiler, state.cur.scope, m, self.end_captures),
             )
-            return state.pop(), end_match.end(), tuple(ret)
+            return state.pop(), m.end(), False, tuple(ret)
 
-        end_match = state.cur.reg.search(line, pos)
+        end_match = state.cur.reg.search(line, pos, first_line, boundary)
         if end_match is not None and end_match.start() == pos:
-            return _end_ret()
+            return _end_ret(end_match)
         elif end_match is None:
-            idx, match = self.regset.search(line, pos)
+            idx, match = self.regset.search(line, pos, first_line, boundary)
             return _do_regset(idx, match, self, compiler, state, pos)
         else:
-            idx, match = self.regset.search(line, pos)
+            idx, match = self.regset.search(line, pos, first_line, boundary)
             if match is None or end_match.start() <= match.start():
-                return _end_ret()
+                return _end_ret(end_match)
             else:
                 return _do_regset(idx, match, self, compiler, state, pos)
 
@@ -653,7 +633,7 @@ class WhileRule(NamedTuple):
     begin_captures: Captures
     while_captures: Captures
     while_: str
-    regset: onigurumacffi._RegSet
+    regset: _RegSet
     u_rules: Tuple[_Rule, ...]
 
     def start(
@@ -661,13 +641,15 @@ class WhileRule(NamedTuple):
             compiler: 'Compiler',
             match: Match[str],
             state: State,
-    ) -> Tuple[State, Regions]:
+    ) -> Tuple[State, bool, Regions]:
         scope = state.cur.scope + self.name
         next_scope = scope + self.content_name
 
-        while_ = compile_regex(match.expand(self.while_))
-        state = state.push_while(self, Entry(next_scope, self, while_))
-        return state, _captures(compiler, scope, match, self.begin_captures)
+        boundary = match.end() == len(match.string)
+        reg = make_reg(match.expand(self.while_))
+        state = state.push_while(self, Entry(next_scope, self, reg, boundary))
+        regions = _captures(compiler, scope, match, self.begin_captures)
+        return state, True, regions
 
     def continues(
             self,
@@ -675,13 +657,15 @@ class WhileRule(NamedTuple):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[int, Regions]]:
-        match = state.cur.reg.match(line, pos)
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[int, bool, Regions]]:
+        match = state.cur.reg.match(line, pos, first_line, boundary)
         if match is None:
             return None
 
         ret = _captures(compiler, state.cur.scope, match, self.while_captures)
-        return match.end(), ret
+        return match.end(), True, ret
 
     def search(
             self,
@@ -689,8 +673,10 @@ class WhileRule(NamedTuple):
             state: State,
             line: str,
             pos: int,
-    ) -> Optional[Tuple[State, int, Regions]]:
-        idx, match = self.regset.search(line, pos)
+            first_line: bool,
+            boundary: bool,
+    ) -> Optional[Tuple[State, int, bool, Regions]]:
+        idx, match = self.regset.search(line, pos, first_line, boundary)
         return _do_regset(idx, match, self, compiler, state, pos)
 
 
@@ -760,7 +746,7 @@ class Compiler:
 
     def _compile_root(self, grammar: Grammar) -> PatternRule:
         regs, rules = self._patterns(grammar, grammar.patterns)
-        return PatternRule((grammar.scope_name,), compile_regset(*regs), rules)
+        return PatternRule((grammar.scope_name,), make_regset(*regs), rules)
 
     def _compile_rule(self, grammar: Grammar, rule: _Rule) -> CompiledRule:
         assert rule.include is None, rule
@@ -775,7 +761,7 @@ class Compiler:
                 self._captures_ref(grammar, rule.begin_captures),
                 self._captures_ref(grammar, rule.end_captures),
                 rule.end,
-                compile_regset(*regs),
+                make_regset(*regs),
                 rules,
             )
         elif rule.begin is not None and rule.while_ is not None:
@@ -786,12 +772,12 @@ class Compiler:
                 self._captures_ref(grammar, rule.begin_captures),
                 self._captures_ref(grammar, rule.while_captures),
                 rule.while_,
-                compile_regset(*regs),
+                make_regset(*regs),
                 rules,
             )
         else:
             regs, rules = self._patterns(grammar, rule.patterns)
-            return PatternRule(rule.name, compile_regset(*regs), rules)
+            return PatternRule(rule.name, make_regset(*regs), rules)
 
     def compile_rule(self, rule: _Rule) -> CompiledRule:
         with contextlib.suppress(KeyError):
@@ -824,9 +810,11 @@ class Grammars:
         ret = self._compilers[grammar] = Compiler(grammar, self.grammars)
         return ret
 
+    def compiler_for_scope(self, scope: str) -> Compiler:
+        return self._compiler_for_grammar(self.grammars[scope])
+
     def blank_compiler(self) -> Compiler:
-        grammar = self.grammars['source.unknown']
-        return self._compiler_for_grammar(grammar)
+        return self.compiler_for_scope('source.unknown')
 
     def compiler_for_file(self, filename: str) -> Compiler:
         if os.path.exists(filename):
@@ -848,9 +836,11 @@ def highlight_line(
         compiler: 'Compiler',
         state: State,
         line: str,
+        first_line: bool,
 ) -> Tuple[State, Regions]:
     ret: List[Region] = []
     pos = 0
+    boundary = state.cur.boundary
 
     # TODO: this is still a little wasteful
     while_stack = []
@@ -858,73 +848,28 @@ def highlight_line(
         while_stack.append((while_rule, idx))
         while_state = State(state.entries[:idx], tuple(while_stack))
 
-        while_res = while_rule.continues(compiler, while_state, line, pos)
+        while_res = while_rule.continues(
+            compiler, while_state, line, pos, first_line, boundary,
+        )
         if while_res is None:
             state = while_state.pop_while()
             break
         else:
-            pos, regions = while_res
+            pos, boundary, regions = while_res
             ret.extend(regions)
 
-    search_res = state.cur.rule.search(compiler, state, line, pos)
+    search_res = state.cur.rule.search(
+        compiler, state, line, pos, first_line, boundary,
+    )
     while search_res is not None:
-        state, pos, regions = search_res
+        state, pos, boundary, regions = search_res
         ret.extend(regions)
 
-        search_res = state.cur.rule.search(compiler, state, line, pos)
+        search_res = state.cur.rule.search(
+            compiler, state, line, pos, first_line, boundary,
+        )
 
     if pos < len(line):
         ret.append(Region(pos, len(line), state.cur.scope))
 
     return state, tuple(ret)
-
-
-def print_styled(s: str, style: Style) -> None:
-    color_s = ''
-    undo_s = ''
-    color_s += C_TRUE.format(**style.fg._asdict())
-    color_s += C_BG_TRUE.format(**style.bg._asdict())
-    undo_s += '\x1b[39m'
-    if style.b:
-        color_s += '\x1b[1m'
-        undo_s += '\x1b[22m'
-    if style.i:
-        color_s += '\x1b[3m'
-        undo_s += '\x1b[23m'
-    if style.u:
-        color_s += '\x1b[4m'
-        undo_s += '\x1b[24m'
-    print(f'{color_s}{s}{undo_s}', end='', flush=True)
-
-
-def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
-    state = State.root(Entry(compiler.root.name, compiler.root, None))
-
-    print(C_BG_TRUE.format(**theme.default.bg._asdict()))
-    with open(filename) as f:
-        for line in f:
-            state, regions = highlight_line(compiler, state, line)
-            for start, end, scope in regions:
-                print_styled(line[start:end], theme.select(scope))
-    print('\x1b[m', end='')
-    return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('theme')
-    parser.add_argument('syntax_dir')
-    parser.add_argument('filename')
-
-    args = parser.parse_args()
-
-    theme = Theme.parse(args.theme)
-
-    grammars = Grammars.from_syntax_dir(args.syntax_dir)
-    compiler = grammars.compiler_for_file(args.filename)
-
-    return _highlight_output(theme, compiler, args.filename)
-
-
-if __name__ == '__main__':
-    exit(main())
