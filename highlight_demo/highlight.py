@@ -25,12 +25,12 @@ if TYPE_CHECKING:
 else:
     Protocol = object
 
+# yes I know this is wrong, but it's good enough for now
+UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
+
 Scope = Tuple[str, ...]
 Regions = Tuple['Region', ...]
 Captures = Tuple[Tuple[int, '_Rule'], ...]
-
-# yes I know this is wrong, but it's good enough for now
-UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
 
 
 class Color(NamedTuple):
