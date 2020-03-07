@@ -130,17 +130,18 @@ class Theme(NamedTuple):
         default = Style.blank()._asdict()
 
         for k in ('foreground', 'editor.foreground'):
-            if k in data['colors']:
+            if k in data.get('colors', {}):
                 default['fg'] = Color.parse(data['colors'][k])
                 break
 
         for k in ('background', 'editor.background'):
-            if k in data['colors']:
+            if k in data.get('colors', {}):
                 default['bg'] = Color.parse(data['colors'][k])
                 break
 
         root: Dict[str, Any] = {'children': {}}
-        for rule in data['tokenColors']:
+        rules = data.get('tokenColors', []) + data.get('settings', [])
+        for rule in rules:
             if 'scope' not in rule:
                 scopes = ['']
             elif isinstance(rule['scope'], str):
