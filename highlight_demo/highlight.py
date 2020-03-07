@@ -595,6 +595,19 @@ class EndRule(NamedTuple):
         regions = _captures(compiler, scope, match, self.begin_captures)
         return state, True, regions
 
+    def _end_ret(
+            self,
+            compiler: 'Compiler',
+            state: State,
+            pos: int,
+            m: Match[str],
+    ) -> Tuple[State, int, bool, Regions]:
+        ret = []
+        if m.start() > pos:
+            ret.append(Region(pos, m.start(), state.cur.scope))
+        ret.extend(_captures(compiler, state.cur.scope, m, self.end_captures))
+        return state.pop(), m.end(), False, tuple(ret)
+
     def search(
             self,
             compiler: 'Compiler',
@@ -604,25 +617,16 @@ class EndRule(NamedTuple):
             first_line: bool,
             boundary: bool,
     ) -> Optional[Tuple[State, int, bool, Regions]]:
-        def _end_ret(m: Match[str]) -> Tuple[State, int, bool, Regions]:
-            ret = []
-            if m.start() > pos:
-                ret.append(Region(pos, m.start(), state.cur.scope))
-            ret.extend(
-                _captures(compiler, state.cur.scope, m, self.end_captures),
-            )
-            return state.pop(), m.end(), False, tuple(ret)
-
         end_match = state.cur.reg.search(line, pos, first_line, boundary)
         if end_match is not None and end_match.start() == pos:
-            return _end_ret(end_match)
+            return self._end_ret(compiler, state, pos, end_match)
         elif end_match is None:
             idx, match = self.regset.search(line, pos, first_line, boundary)
             return _do_regset(idx, match, self, compiler, state, pos)
         else:
             idx, match = self.regset.search(line, pos, first_line, boundary)
             if match is None or end_match.start() <= match.start():
-                return _end_ret(end_match)
+                return self._end_ret(compiler, state, pos, end_match)
             else:
                 return _do_regset(idx, match, self, compiler, state, pos)
 
