@@ -2,7 +2,6 @@ import contextlib
 import functools
 import json
 import os.path
-import re
 from typing import Any
 from typing import Dict
 from typing import FrozenSet
@@ -11,8 +10,8 @@ from typing import Match
 from typing import NamedTuple
 from typing import Optional
 from typing import Tuple
-from typing import TYPE_CHECKING
 
+from highlight_demo._types import Protocol
 from highlight_demo.fdict import FDict
 from highlight_demo.reg import _Reg
 from highlight_demo.reg import _RegSet
@@ -20,160 +19,9 @@ from highlight_demo.reg import ERR_REG
 from highlight_demo.reg import make_reg
 from highlight_demo.reg import make_regset
 
-if TYPE_CHECKING:
-    from typing import Protocol
-else:
-    Protocol = object
-
-# yes I know this is wrong, but it's good enough for now
-UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
-
 Scope = Tuple[str, ...]
 Regions = Tuple['Region', ...]
 Captures = Tuple[Tuple[int, '_Rule'], ...]
-
-
-class Color(NamedTuple):
-    r: int
-    g: int
-    b: int
-
-    @classmethod
-    def parse(cls, s: str) -> 'Color':
-        return cls(r=int(s[1:3], 16), g=int(s[3:5], 16), b=int(s[5:7], 16))
-
-
-class Style(NamedTuple):
-    fg: Color
-    bg: Color
-    b: bool
-    i: bool
-    u: bool
-
-    @classmethod
-    def blank(cls) -> 'Style':
-        return cls(
-            fg=Color(0xff, 0xff, 0xff), bg=Color(0x00, 0x00, 0x00),
-            b=False, i=False, u=False,
-        )
-
-
-class PartialStyle(NamedTuple):
-    fg: Optional[Color] = None
-    bg: Optional[Color] = None
-    b: Optional[bool] = None
-    i: Optional[bool] = None
-    u: Optional[bool] = None
-
-    def overlay_on(self, dct: Dict[str, Any]) -> None:
-        for attr in self._fields:
-            value = getattr(self, attr)
-            if value is not None:
-                dct[attr] = value
-
-    @classmethod
-    def from_dct(cls, dct: Dict[str, Any]) -> 'PartialStyle':
-        kv = cls()._asdict()
-        if 'foreground' in dct:
-            kv['fg'] = Color.parse(dct['foreground'])
-        if 'background' in dct:
-            kv['bg'] = Color.parse(dct['background'])
-        if dct.get('fontStyle') == 'bold':
-            kv['b'] = True
-        elif dct.get('fontStyle') == 'italic':
-            kv['i'] = True
-        elif dct.get('fontStyle') == 'underline':
-            kv['u'] = True
-        return cls(**kv)
-
-
-class _ThemeTrieNode(Protocol):
-    @property
-    def style(self) -> PartialStyle: ...
-    @property
-    def children(self) -> FDict[str, '_ThemeTrieNode']: ...
-
-
-class ThemeTrieNode(NamedTuple):
-    style: PartialStyle
-    children: FDict[str, _ThemeTrieNode]
-
-    @classmethod
-    def from_dct(cls, dct: Dict[str, Any]) -> _ThemeTrieNode:
-        children = FDict({
-            k: ThemeTrieNode.from_dct(v) for k, v in dct['children'].items()
-        })
-        return cls(PartialStyle.from_dct(dct), children)
-
-
-class Theme(NamedTuple):
-    default: Style
-    rules: _ThemeTrieNode
-
-    @functools.lru_cache(maxsize=None)
-    def select(self, scope: Scope) -> Style:
-        if not scope:
-            return self.default
-        else:
-            style = self.select(scope[:-1])._asdict()
-            node = self.rules
-            for part in scope[-1].split('.'):
-                if part not in node.children:
-                    break
-                else:
-                    node = node.children[part]
-                    node.style.overlay_on(style)
-            return Style(**style)
-
-    @classmethod
-    def from_dct(cls, data: Dict[str, Any]) -> 'Theme':
-        default = Style.blank()._asdict()
-
-        for k in ('foreground', 'editor.foreground'):
-            if k in data.get('colors', {}):
-                default['fg'] = Color.parse(data['colors'][k])
-                break
-
-        for k in ('background', 'editor.background'):
-            if k in data.get('colors', {}):
-                default['bg'] = Color.parse(data['colors'][k])
-                break
-
-        root: Dict[str, Any] = {'children': {}}
-        rules = data.get('tokenColors', []) + data.get('settings', [])
-        for rule in rules:
-            if 'scope' not in rule:
-                scopes = ['']
-            elif isinstance(rule['scope'], str):
-                scopes = [
-                    s.strip() for s in rule['scope'].split(',')
-                    # some themes have a buggy trailing comma
-                    if s.strip()
-                ]
-            else:
-                scopes = rule['scope']
-
-            for scope in scopes:
-                if ' ' in scope:
-                    # TODO: implement parent scopes
-                    continue
-                elif scope == '':
-                    PartialStyle.from_dct(rule['settings']).overlay_on(default)
-                    continue
-
-                cur = root
-                for part in scope.split('.'):
-                    cur = cur['children'].setdefault(part, {'children': {}})
-
-                cur.update(rule['settings'])
-
-        return cls(Style(**default), ThemeTrieNode.from_dct(root))
-
-    @classmethod
-    def parse(cls, filename: str) -> 'Theme':
-        with open(filename) as f:
-            contents = UN_COMMENT.sub('', f.read())
-            return cls.from_dct(json.loads(contents))
 
 
 def _split_name(s: Optional[str]) -> Tuple[str, ...]:

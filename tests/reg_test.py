@@ -1,3 +1,6 @@
+import onigurumacffi
+import pytest
+
 from highlight_demo.reg import _Reg
 from highlight_demo.reg import _RegSet
 
@@ -24,6 +27,25 @@ def test_reg_neither():
     assert not reg.search('ohello', 1, first_line=False, boundary=False)
 
 
+def test_reg_other_escapes_left_untouched():
+    reg = _Reg(r'(^|\A|\G)\w\s\w')
+    assert reg.match('a b', 0, first_line=False, boundary=False)
+
+
+def test_reg_not_out_of_bounds_at_end():
+    # the only way this is triggerable is with an illegal regex, we'd rather
+    # produce an error about the regex being wrong than an IndexError
+    reg = _Reg('\\A\\')
+    with pytest.raises(onigurumacffi.OnigError) as excinfo:
+        reg.search('\\', 0, first_line=False, boundary=False)
+    msg, = excinfo.value.args
+    assert msg == 'end pattern at escape'
+
+
+def test_reg_repr():
+    assert repr(_Reg(r'\A123')) == r"_Reg('\\A123')"
+
+
 def test_regset_first_line():
     regset = _RegSet(r'\Ahello', 'hello')
     idx, _ = regset.search('hello', 0, first_line=True, boundary=True)
@@ -46,3 +68,7 @@ def test_regset_neither():
     assert idx == 2
     idx, _ = regset.search('ohello', 1, first_line=False, boundary=False)
     assert idx == 2
+
+
+def test_regset_repr():
+    assert repr(_RegSet('ohai', r'\Aworld')) == r"_RegSet('ohai', '\\Aworld')"

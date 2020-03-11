@@ -43,7 +43,7 @@ class _Reg:
         self._pattern = s
 
     def __repr__(self) -> str:
-        return f'{type(self).__name__}({self._pattern})'
+        return f'{type(self).__name__}({self._pattern!r})'
 
     @cached_property
     def _reg(self) -> onigurumacffi._Pattern:

@@ -6,8 +6,8 @@ from highlight_demo.highlight import Entry
 from highlight_demo.highlight import Grammars
 from highlight_demo.highlight import highlight_line
 from highlight_demo.highlight import State
-from highlight_demo.highlight import Style
-from highlight_demo.highlight import Theme
+from highlight_demo.theme import Style
+from highlight_demo.theme import Theme
 
 HERE = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 DEFAULT_THEME = os.path.join(HERE, 'demo/themes/dark_plus_vs.json')
