@@ -52,7 +52,7 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    theme = Theme.parse(args.theme)
+    theme = Theme.from_filename(args.theme)
 
     grammars = Grammars.from_syntax_dir(args.syntax_dir)
     compiler = grammars.compiler_for_file(args.filename)

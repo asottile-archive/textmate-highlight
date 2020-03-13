@@ -1,5 +1,6 @@
 import functools
 import json
+import os.path
 import re
 from typing import Any
 from typing import Dict
@@ -151,11 +152,14 @@ class Theme(NamedTuple):
         return cls(Style(**default), TrieNode.from_dct(root))
 
     @classmethod
-    def parse(cls, filename: str) -> 'Theme':
-        with open(filename) as f:
-            contents = UN_COMMENT.sub('', f.read())
-            return cls.from_dct(json.loads(contents))
-
-    @classmethod
     def blank(cls) -> 'Theme':
         return cls(Style.blank(), TrieNode.from_dct({'children': {}}))
+
+    @classmethod
+    def from_filename(cls, filename: str) -> 'Theme':
+        if not os.path.exists(filename):
+            return cls.blank()
+        else:
+            with open(filename) as f:
+                contents = UN_COMMENT.sub('', f.read())
+                return cls.from_dct(json.loads(contents))
