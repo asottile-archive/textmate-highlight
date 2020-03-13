@@ -2,10 +2,8 @@ import argparse
 import os.path
 
 from highlight_demo.highlight import Compiler
-from highlight_demo.highlight import Entry
 from highlight_demo.highlight import Grammars
 from highlight_demo.highlight import highlight_line
-from highlight_demo.highlight import State
 from highlight_demo.theme import Style
 from highlight_demo.theme import Theme
 
@@ -33,7 +31,7 @@ def print_styled(s: str, style: Style) -> None:
 
 
 def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
-    state = State.root(Entry(compiler.root.name, compiler.root))
+    state = compiler.root_state
 
     print('\x1b[48;2;{r};{g};{b}m'.format(**theme.default.bg._asdict()))
     with open(filename) as f:

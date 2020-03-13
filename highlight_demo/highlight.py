@@ -539,7 +539,8 @@ class Compiler:
         self._grammars = grammars
         self._rule_to_grammar: Dict[_Rule, Grammar] = {}
         self._c_rules: Dict[_Rule, CompiledRule] = {}
-        self.root = self._compile_root(grammar)
+        root = self._compile_root(grammar)
+        self.root_state = State.root(Entry(root.name, root))
 
     def _visit_rule(self, grammar: Grammar, rule: _Rule) -> _Rule:
         self._rule_to_grammar[rule] = grammar

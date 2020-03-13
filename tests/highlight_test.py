@@ -1,17 +1,14 @@
-from highlight_demo.highlight import Entry
 from highlight_demo.highlight import Grammar
 from highlight_demo.highlight import Grammars
 from highlight_demo.highlight import highlight_line
 from highlight_demo.highlight import Region
-from highlight_demo.highlight import State
 
 
 def _compiler_state(grammar_dct, *others):
     grammar = Grammar.from_data(grammar_dct)
     grammars = [grammar, *(Grammar.from_data(dct) for dct in others)]
     compiler = Grammars(grammars).compiler_for_scope(grammar.scope_name)
-    state = State.root(Entry(compiler.root.name, compiler.root))
-    return compiler, state
+    return compiler, compiler.root_state
 
 
 def test_backslash_a():
