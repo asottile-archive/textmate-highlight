@@ -4,6 +4,12 @@ from highlight_demo.highlight import highlight_line
 from highlight_demo.highlight import Region
 
 
+def test_grammar_matches_extension_only_name():
+    data = {'scopeName': 'test', 'patterns': [], 'fileTypes': ['bashrc']}
+    grammar = Grammar.from_data(data)
+    assert grammar.matches_file('.bashrc', 'alias nano=babi')
+
+
 def _compiler_state(grammar_dct, *others):
     grammar = Grammar.from_data(grammar_dct)
     grammars = [grammar, *(Grammar.from_data(dct) for dct in others)]
@@ -277,6 +283,106 @@ def test_captures_ignores_invalid_out_of_bounds():
 
     assert regions == (
         Region(0, 1, ('test',)),
+    )
+
+
+def test_captures_begin_end():
+    compiler, state = _compiler_state({
+        'scopeName': 'test',
+        'patterns': [
+            {
+                'begin': '(""")',
+                'end': '(""")',
+                'beginCaptures': {'1': {'name': 'startquote'}},
+                'endCaptures': {'1': {'name': 'endquote'}},
+            },
+        ],
+    })
+
+    state, regions = highlight_line(compiler, state, '"""x"""', True)
+
+    assert regions == (
+        Region(0, 3, ('test', 'startquote')),
+        Region(3, 4, ('test',)),
+        Region(4, 7, ('test', 'endquote')),
+    )
+
+
+def test_captures_while_captures():
+    compiler, state = _compiler_state({
+        'scopeName': 'test',
+        'patterns': [
+            {
+                'begin': '(>) ',
+                'while': '(>) ',
+                'beginCaptures': {'1': {'name': 'bblock'}},
+                'whileCaptures': {'1': {'name': 'wblock'}},
+            },
+        ],
+    })
+
+    state, regions1 = highlight_line(compiler, state, '> x\n', True)
+    state, regions2 = highlight_line(compiler, state, '> x\n', False)
+
+    assert regions1 == (
+        Region(0, 1, ('test', 'bblock')),
+        Region(1, 2, ('test',)),
+        Region(2, 4, ('test',)),
+    )
+
+    assert regions2 == (
+        Region(0, 1, ('test', 'wblock')),
+        Region(1, 2, ('test',)),
+        Region(2, 4, ('test',)),
+    )
+
+
+def test_captures_implies_begin_end_captures():
+    compiler, state = _compiler_state({
+        'scopeName': 'test',
+        'patterns': [
+            {
+                'begin': '(""")',
+                'end': '(""")',
+                'captures': {'1': {'name': 'quote'}},
+            },
+        ],
+    })
+
+    state, regions = highlight_line(compiler, state, '"""x"""', True)
+
+    assert regions == (
+        Region(0, 3, ('test', 'quote')),
+        Region(3, 4, ('test',)),
+        Region(4, 7, ('test', 'quote')),
+    )
+
+
+def test_captures_implies_begin_while_captures():
+    compiler, state = _compiler_state({
+        'scopeName': 'test',
+        'patterns': [
+            {
+                'begin': '(>) ',
+                'while': '(>) ',
+                'captures': {'1': {'name': 'block'}},
+            },
+        ],
+    })
+
+    state, regions1 = highlight_line(compiler, state, '> x\n', True)
+    state, regions2 = highlight_line(compiler, state, '> x\n', False)
+
+    assert regions1 == (
+        Region(0, 1, ('test', 'block')),
+        Region(1, 2, ('test',)),
+        Region(2, 4, ('test',)),
+    )
+
+    assert regions2 == (
+        Region(0, 1, ('test', 'block')),
+        Region(1, 2, ('test',)),
+        Region(2, 4, ('test',)),
     )
 
 
