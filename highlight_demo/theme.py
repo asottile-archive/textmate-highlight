@@ -9,35 +9,23 @@ from typing import Optional
 from typing import Tuple
 
 from highlight_demo._types import Protocol
+from highlight_demo.color import Color
 from highlight_demo.fdict import FDict
 
 # yes I know this is wrong, but it's good enough for now
 UN_COMMENT = re.compile(r'^\s*//.*$', re.MULTILINE)
 
 
-class Color(NamedTuple):
-    r: int
-    g: int
-    b: int
-
-    @classmethod
-    def parse(cls, s: str) -> 'Color':
-        return cls(r=int(s[1:3], 16), g=int(s[3:5], 16), b=int(s[5:7], 16))
-
-
 class Style(NamedTuple):
-    fg: Color
-    bg: Color
+    fg: Optional[Color]
+    bg: Optional[Color]
     b: bool
     i: bool
     u: bool
 
     @classmethod
     def blank(cls) -> 'Style':
-        return cls(
-            fg=Color(0xff, 0xff, 0xff), bg=Color(0x00, 0x00, 0x00),
-            b=False, i=False, u=False,
-        )
+        return cls(fg=None, bg=None, b=False, i=False, u=False)
 
 
 class PartialStyle(NamedTuple):
@@ -128,9 +116,9 @@ class Theme(NamedTuple):
                 scopes = ['']
             elif isinstance(rule['scope'], str):
                 scopes = [
-                    s.strip() for s in rule['scope'].split(',')
-                    # some themes have a buggy trailing comma
-                    if s.strip()
+                    s.strip()
+                    # some themes have a buggy trailing/leading comma
+                    for s in rule['scope'].strip().strip(',').split(',')
                 ]
             else:
                 scopes = rule['scope']

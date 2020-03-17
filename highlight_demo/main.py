@@ -15,9 +15,12 @@ DEFAULT_SYNTAX_DIR = os.path.join(HERE, 'demo/languages')
 def print_styled(s: str, style: Style) -> None:
     color_s = ''
     undo_s = ''
-    color_s += '\x1b[38;2;{r};{g};{b}m'.format(**style.fg._asdict())
-    color_s += '\x1b[48;2;{r};{g};{b}m'.format(**style.bg._asdict())
-    undo_s += '\x1b[39m'
+    if style.fg is not None:
+        color_s += '\x1b[38;2;{r};{g};{b}m'.format(**style.fg._asdict())
+        undo_s += '\x1b[39m'
+    if style.bg is not None:
+        color_s += '\x1b[48;2;{r};{g};{b}m'.format(**style.bg._asdict())
+        undo_s += '\x1b[49m'
     if style.b:
         color_s += '\x1b[1m'
         undo_s += '\x1b[22m'
@@ -33,7 +36,8 @@ def print_styled(s: str, style: Style) -> None:
 def _highlight_output(theme: Theme, compiler: Compiler, filename: str) -> int:
     state = compiler.root_state
 
-    print('\x1b[48;2;{r};{g};{b}m'.format(**theme.default.bg._asdict()))
+    if theme.default.bg is not None:
+        print('\x1b[48;2;{r};{g};{b}m'.format(**theme.default.bg._asdict()))
     with open(filename) as f:
         for line_idx, line in enumerate(f):
             first_line = line_idx == 0
