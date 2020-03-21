@@ -56,10 +56,13 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    with open(args.filename) as f:
+        first_line = next(f, '')
+
     theme = Theme.from_filename(args.theme)
 
     grammars = Grammars.from_syntax_dir(args.syntax_dir)
-    compiler = grammars.compiler_for_file(args.filename)
+    compiler = grammars.compiler_for_file(args.filename, first_line)
 
     return _highlight_output(theme, compiler, args.filename)
 
