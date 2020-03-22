@@ -19,6 +19,7 @@ from highlight_demo.fdict import FDict
 from highlight_demo.reg import _Reg
 from highlight_demo.reg import _RegSet
 from highlight_demo.reg import ERR_REG
+from highlight_demo.reg import expand_escaped
 from highlight_demo.reg import make_reg
 from highlight_demo.reg import make_regset
 
@@ -418,7 +419,7 @@ class EndRule(NamedTuple):
         next_scope = scope + self.content_name
 
         boundary = match.end() == len(match.string)
-        reg = make_reg(match.expand(self.end))
+        reg = make_reg(expand_escaped(match, self.end))
         state = state.push(Entry(next_scope, self, reg, boundary))
         regions = _captures(compiler, scope, match, self.begin_captures)
         return state, True, regions
@@ -479,7 +480,7 @@ class WhileRule(NamedTuple):
         next_scope = scope + self.content_name
 
         boundary = match.end() == len(match.string)
-        reg = make_reg(match.expand(self.while_))
+        reg = make_reg(expand_escaped(match, self.while_))
         state = state.push_while(self, Entry(next_scope, self, reg, boundary))
         regions = _captures(compiler, scope, match, self.begin_captures)
         return state, True, regions
