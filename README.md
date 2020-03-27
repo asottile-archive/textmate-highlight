@@ -1,3 +1,9 @@
+# DEPRECATED
+
+this has been merged into [babi] as `babi-textmate-demo`
+
+___
+
 textmate-highlight
 ==================
 
